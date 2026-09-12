@@ -76,6 +76,7 @@ def _to_source_detail_response(source: Source) -> SourceDetailResponse:
         error_message=source.error_message,
         created_at=source.created_at,
         updated_at=source.updated_at,
+        content=source.raw_content,
         spans=spans,
         chunks=chunks,
     )

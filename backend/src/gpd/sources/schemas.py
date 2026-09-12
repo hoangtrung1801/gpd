@@ -50,6 +50,7 @@ class SourceResponse(BaseModel):
 
 
 class SourceDetailResponse(SourceResponse):
+    content: str | None = None
     spans: list[SourceSpanResponse] = Field(default_factory=list)
     chunks: list[SourceChunkResponse] = Field(default_factory=list)
 
