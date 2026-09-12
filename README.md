@@ -1,6 +1,25 @@
 # GPD — Grounded Project Developer
 
-GPD is a developer memory and team coordination platform that unifies project specifications (PRD, FRD, ADR), conversational discussions (Slack), and active workspace state into budgeted, canonical context packages for human developers and external coding agents.
+GPD is a developer memory and team coordination platform that unifies project specifications (PRD, FRD, ADR), conversational discussions (Slack, Telegram), and active workspace state into budgeted, canonical context packages for human developers and external coding agents.
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │          External Interfaces            │
+                  │  CLI (gpd)  •  Web UI  •  MCP  •  Chat  │
+                  └────┬───────────┬─────────┬─────────┬────┘
+                       │           │         │         │
+                       ▼           ▼         ▼         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          GPD Monorepo                                  │
+│                                                                        │
+│  apps/cli        Developer command-line interface                      │
+│  apps/web        React / Vite operations & knowledge review dashboard   │
+│  apps/mcp        Model Context Protocol server for AI coding agents    │
+│  apps/channel    Telegram bot agent for chat triage & proposals        │
+│  backend         FastAPI, SQLite, FTS5 lexical search & vector index   │
+│  packages/*      Shared api-client, config manager, and contracts      │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -29,17 +48,30 @@ uv sync
 # Python backend & E2E release gate tests
 uv run pytest backend/tests tests/e2e -q
 
-# Node workspace tests (api-client, config, contracts, cli, mcp, web)
+# Node workspace tests (api-client, config, contracts, cli, mcp, web, channel)
 pnpm -r test
 ```
 
 ### Start Services
+
+#### Option A: Individual Processes
 ```bash
 # Terminal 1: Start GPD Backend API
 uv run uvicorn gpd.app:app --host 127.0.0.1 --port 7337
+# (or via CLI: gpd server start)
 
 # Terminal 2: Start Web Dashboard
 pnpm --filter @gpd/web dev
+
+# Terminal 3: Start Telegram Bot Agent (optional)
+pnpm dev:channel
+# or: pnpm --filter @gpd/channel dev
+```
+
+#### Option B: Process Manager (PM2)
+```bash
+# Start API, Web Dashboard, and Telegram Channel simultaneously
+pm2 start ecosystem.config.cjs
 ```
 
 ---
@@ -71,6 +103,7 @@ curl http://127.0.0.1:7337/health/live
 | `GPD_API_PORT` | `7337` | Port for API server |
 | `GPD_ACCESS_TOKEN` | *None* | Bearer token (required when binding non-loopback host) |
 | `GPD_VECTOR_SEARCH_ENABLED` | `true` | Set `false` to disable vector embeddings and fallback to FTS5 |
+| `GPD_SESSION_HEARTBEAT_TIMEOUT_SECONDS` | `120` | Heartbeat inactivity timeout before marking active sessions stale |
 
 ### Slack Integration
 | Variable | Description |
@@ -78,10 +111,17 @@ curl http://127.0.0.1:7337/health/live
 | `GPD_SLACK_SIGNING_SECRET` | HMAC-SHA256 signing secret for verifying incoming Slack event callbacks |
 | `GPD_SLACK_BOT_TOKEN` | Bot user OAuth token (`xoxb-...`) for thread retrieval and confirmation messages |
 
+### Telegram Bot Integration (@gpd/channel)
+| Variable | Description |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Bot user token from [@BotFather](https://t.me/BotFather) for Telegram assistant |
+| `GPD_API_URL` | GPD backend API URL (e.g. `http://127.0.0.1:7337`) |
+| `GPD_ACCESS_TOKEN` | Bearer token for authenticating channel agent requests to GPD API |
+
 ### LLM & Embedding Integration
 | Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | *None* | OpenAI API key for real extraction workflows (not required when using fakes) |
+| `OPENAI_API_KEY` | *None* | OpenAI API key for extraction workflows and Telegram assistant |
 | `GPD_LLM_MODEL` | `gpt-4o` | Model name for structured extraction |
 | `GPD_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for semantic vector index |
 | `GPD_CONTEXT_TOKEN_BUDGET` | `8000` | Target token budget for assembled context packages |
@@ -101,8 +141,9 @@ gpd add docs/checkout-prd.md
 gpd add docs/checkout-frd.md
 gpd add docs/payment-adr.md
 
-# 3. List and select current task
+# 3. List and inspect tasks
 gpd task list
+gpd task show BUG-1
 gpd task set BUG-1
 
 # 4. Start active developer session with Git context
@@ -112,24 +153,52 @@ gpd start
 gpd context
 gpd context --format json
 
-# 6. Check workspace and health status
+# 6. Check workspace, health, and diagnose system
 gpd status
+gpd doctor
 
-# 7. Complete session and extract new knowledge proposals
+# 7. Launch external coding agent with budgeted context (optional)
+gpd agent "Fix payment timeout retry logic"
+
+# 8. Complete session and extract new knowledge proposals
 gpd finish --summary "Normalize payment errors in PaymentService"
 
-# 8. Human review gate: review and confirm knowledge proposal via CLI
+# 9. Human review gate: review, confirm, edit, or reject knowledge proposals
 gpd knowledge review
 gpd knowledge review confirm <PROPOSAL_ID>
+gpd knowledge review edit <PROPOSAL_ID> "Updated canonical knowledge content"
+gpd knowledge review reject <PROPOSAL_ID> "Not applicable to main branch"
 ```
 
 ---
-
 ## 6. MCP Client Configuration
 
 To integrate GPD with AI coding agents (such as Claude Desktop, Cursor, or Cline) via the Model Context Protocol (MCP):
 
-Add the following to your MCP client configuration (e.g., `claude_desktop_config.json`):
+For automatic discovery by MCP-enabled editors (Cursor, Claude Code), configure `.mcp.json` in your workspace root:
+```json
+{
+  "mcpServers": {
+    "gpd": {
+      "command": "pnpm",
+      "args": [
+        "--filter",
+        "@gpd/mcp",
+        "exec",
+        "tsx",
+        "src/server.ts"
+      ],
+      "cwd": "/path/to/gpd",
+      "env": {
+        "GPD_API_URL": "http://127.0.0.1:7337",
+        "GPD_ACCESS_TOKEN": ""
+      }
+    }
+  }
+}
+```
+
+Or when running from pre-built distribution:
 
 ```json
 {
@@ -148,22 +217,43 @@ Add the following to your MCP client configuration (e.g., `claude_desktop_config
 ```
 
 ### Exposed MCP Tools
-- `gpd_project_get`: Retrieve current project metadata and settings
-- `gpd_task_list`: Query and filter project tasks
-- `gpd_task_get`: Fetch task details and evidence
-- `gpd_task_select`: Set active task for current workspace
-- `gpd_session_start`: Start developer session with git snapshot
-- `gpd_session_status`: Retrieve current session and activity report
-- `gpd_context_get`: Retrieve canonical budgeted context package
-- `gpd_activity_report`: Report developer progress and edits
-- `gpd_session_finish`: Complete session and trigger knowledge extraction
-- `gpd_knowledge_proposal_list`: List pending knowledge proposals
+- `gpd_project_get`: Retrieve current project metadata and subsystem health (database, search, integrations)
+- `gpd_task_list`: Query and filter project tasks by status, type, and search query
+- `gpd_task_get`: Fetch task details, acceptance criteria, bug reproduction steps, and source provenance
+- `gpd_task_select`: Set active task and persist atomically to `.gpd/config.json`
+- `gpd_session_start`: Start developer session with git snapshot and active-work conflict warnings
+- `gpd_session_status`: Retrieve current session state, modified files, and active lease health
+- `gpd_context_get`: Retrieve canonical budgeted context package for the active session
+- `gpd_activity_report`: Report developer heartbeat, branch, and relative modified files
+- `gpd_session_finish`: Complete session, submit commit/file metadata, and extract candidate knowledge proposals
+- `gpd_knowledge_proposal_list`: List pending knowledge proposals with source evidence for review
 
 *Note*: Knowledge proposals **cannot** be confirmed or modified via MCP tools. Confirmations are restricted to the CLI human gate (`gpd knowledge review confirm`) or the web dashboard.
 
 ---
 
-## 7. Deterministic Demo & Release Gate Command
+## 7. Telegram Bot Agent (@gpd/channel)
+
+GPD includes a Telegram bot assistant (`apps/channel`) built with [GrammY](https://grammy.dev/) that connects directly to the GPD API and OpenAI:
+
+- **Direct Telegram Integration**: Connects directly to Telegram Bot API with long-polling — no external gateways or cloud proxies required.
+- **Task Management**: Query tasks and triage bugs (`/tasks [status]`) or converse with the AI assistant.
+- **Knowledge Search**: Search specifications, ADRs, and confirmed knowledge (`/search <query>`).
+- **Human-in-the-Loop Decision Buttons**: Propose engineering actions (`/propose <action> | <details>`) with interactive inline keyboard buttons (`Approve` / `Hold`) for team review.
+- **Structured Cards**: Rich formatting for task priorities, status badges, and source links.
+
+### Telegram Commands
+| Command | Description |
+|---|---|
+| `/start` | Display welcome greeting and bot capabilities |
+| `/tasks [status]` | List project tasks and bugs (e.g. `/tasks open`) |
+| `/search <query>` | Search knowledge base documents and specifications |
+| `/propose <action> \| <details>` | Post an action proposal with interactive review buttons |
+| `/help` | Display command help and usage examples |
+
+---
+
+## 8. Deterministic Demo & Release Gate Command
 
 Run the complete deterministic demo harness in one command:
 
@@ -188,7 +278,7 @@ The demo script automatically:
 
 ---
 
-## 8. Backup & Disaster Recovery
+## 9. Backup & Disaster Recovery
 
 GPD uses an atomic SQLite database with transaction logging:
 
@@ -207,7 +297,7 @@ uv run python -m gpd.db.migrations
 
 ---
 
-## 9. Degraded Modes & Fallback Behavior
+## 10. Degraded Modes & Fallback Behavior
 
 GPD is engineered to remain functional during external outages and misconfigurations:
 - **Vector Search Unavailable (`vector_search_unavailable`)**: When `GPD_VECTOR_SEARCH_ENABLED=false` or SQLite vector extensions are disabled, GPD automatically falls back to SQLite FTS5 full-text lexical search and direct graph relationships. All core workflows remain green.
@@ -217,7 +307,7 @@ GPD is engineered to remain functional during external outages and misconfigurat
 
 ---
 
-## 10. First-Release (v1) Boundaries
+## 11. First-Release (v1) Boundaries
 
 The initial release targets single-repository local developer workspaces:
 - Single active project per local workspace directory (`.gpd/config.json`).
