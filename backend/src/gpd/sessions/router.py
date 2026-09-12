@@ -53,6 +53,16 @@ async def heartbeat(
     return ApiEnvelope[DeveloperSession](ok=True, data=session)
 
 
+@router.post("/{session_id}/finish", response_model=ApiEnvelope[FinishSessionResponse])
+async def finish_session(
+    session_id: str,
+    data: FinishSessionRequest,
+    service: SessionService = Depends(get_session_service),
+) -> ApiEnvelope[FinishSessionResponse]:
+    result = await service.finish(session_id, data)
+    return ApiEnvelope[FinishSessionResponse](ok=True, data=result)
+
+
 @router.get("", response_model=ApiEnvelope[list[DeveloperSession]])
 async def list_sessions(
     project_id: str | None = None,

@@ -113,43 +113,45 @@ class KnowledgeService:
         content: str,
         evidence: Sequence[dict[str, Any]] | None = None,
         confidence: float = 1.0,
+        session: Session | None = None,
     ) -> KnowledgeItem:
-        def _txn() -> KnowledgeItem:
-            with self.database.session() as session:
-                with session.begin():
-                    now = utc_now_iso()
-                    item = KnowledgeItemModel(
-                        id=new_uuid(),
-                        project_id=project_id,
-                        type=type,
-                        title=title,
-                        content=content,
-                        confidence=confidence,
-                        status="confirmed",
-                        created_at=now,
-                        updated_at=now,
+        def _execute(sess: Session) -> KnowledgeItem:
+            now = utc_now_iso()
+            item = KnowledgeItemModel(
+                id=new_uuid(),
+                project_id=project_id,
+                type=type,
+                title=title,
+                content=content,
+                confidence=confidence,
+                status="confirmed",
+                created_at=now,
+                updated_at=now,
+            )
+            sess.add(item)
+            sess.flush()
+
+            if evidence:
+                for ev in evidence:
+                    sess.add(
+                        KnowledgeEvidenceModel(
+                            id=new_uuid(),
+                            knowledge_id=item.id,
+                            evidence_type=ev.get("evidence_type", "reference"),
+                            target_id=ev.get("target_id", ""),
+                            detail=ev.get("detail"),
+                            created_at=now,
+                        )
                     )
-                    session.add(item)
-                    session.flush()
+            sess.flush()
+            return item.to_schema()
 
-                    if evidence:
-                        for ev in evidence:
-                            session.add(
-                                KnowledgeEvidenceModel(
-                                    id=new_uuid(),
-                                    knowledge_id=item.id,
-                                    evidence_type=ev.get("evidence_type", "reference"),
-                                    target_id=ev.get("target_id", ""),
-                                    detail=ev.get("detail"),
-                                    created_at=now,
-                                )
-                            )
-                    session.flush()
-                    return item.to_schema()
+        if session is not None:
+            return _execute(session)
 
-        # Database.write is async, but this is a synchronous helper for test/internal use
-        # Let's support both sync execution via database.session() directly or asyncio.to_thread
-        return _txn()
+        with self.database.session() as new_sess:
+            with new_sess.begin():
+                return _execute(new_sess)
 
     def get_item(self, item_id: str) -> KnowledgeItem | None:
         with self.database.session() as session:

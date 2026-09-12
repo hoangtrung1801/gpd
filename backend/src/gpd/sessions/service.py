@@ -9,16 +9,22 @@ from gpd.audit.service import append as append_audit
 from gpd.conflicts.overlap import OverlapDetector, OverlapSessionInput, detect_work_overlaps
 from gpd.conflicts.repository import ConflictRepository
 from gpd.db.engine import Database
+from gpd.knowledge.proposals import ProposalRepository
+from gpd.knowledge.workflows.knowledge_extraction import KnowledgeExtractionWorkflow
+from gpd.sessions.completion import CompletionInput, sanitize_diff
 from gpd.sessions.git_inspector import GitInspector
 from gpd.sessions.repository import SessionRepository
 from gpd.sessions.schemas import (
     ChangedFile,
     CommitSummary,
     DeveloperSession,
+    FinishSessionRequest,
+    FinishSessionResponse,
     HeartbeatRequest,
     OverlapWarning,
     StartSessionRequest,
     StartSessionResponse,
+    utc_now_iso,
 )
 
 
@@ -50,7 +56,6 @@ class SessionService:
         endpoint = "POST /api/v1/sessions"
         request_hash = self._compute_request_hash(data)
 
-        # 1. Run git inspector if repo_path provided (outside txn)
         changed_files = list(data.changed_files or [])
         commits: list[CommitSummary] = []
         branch = ""
@@ -62,13 +67,11 @@ class SessionService:
                     changed_files = snapshot.changed_files
                 commits = snapshot.recent_commits
             except Exception:
-                # If git inspect fails, proceed with provided info
                 pass
 
         def _txn() -> tuple[DeveloperSession, list[OverlapWarning], bool]:
             with self.database.session() as session:
                 with session.begin():
-                    # Idempotency check
                     if idempotency_key:
                         existing_key = self.session_repo.get_idempotency_key(
                             session, endpoint, idempotency_key
@@ -89,13 +92,11 @@ class SessionService:
                                     message="Idempotency key mismatch with different payload",
                                 )
 
-                    # Check other active sessions in the project
                     self.session_repo.mark_stale_sessions(session, expiry_seconds=120)
                     active_models = self.session_repo.list_sessions(
                         session, project_id=data.project_id, status="active"
                     )
 
-                    # Create session
                     model = self.session_repo.create(
                         session=session,
                         project_id=data.project_id,
@@ -108,7 +109,6 @@ class SessionService:
                         commits=commits,
                     )
 
-                    # Overlap detection
                     current_input = OverlapSessionInput(
                         session_id=model.id,
                         task_id=data.task_id,
@@ -135,7 +135,6 @@ class SessionService:
                         expiry_seconds=120,
                     )
 
-                    # Persist conflict records for warnings
                     for w in warnings:
                         self.conflict_repo.create(
                             session=session,
@@ -149,7 +148,6 @@ class SessionService:
 
                     sess_schema = model.to_schema()
 
-                    # Save idempotency key if provided
                     if idempotency_key:
                         resp_payload = {
                             "session": sess_schema.model_dump(mode="json"),
@@ -164,7 +162,6 @@ class SessionService:
                             response_body=json.dumps(resp_payload),
                         )
 
-                    # Audit event
                     append_audit(
                         session=session,
                         actor=data.developer or data.agent or "developer",
@@ -239,5 +236,69 @@ class SessionService:
                     status=status,
                 )
                 return [m.to_schema() for m in models]
+
+        return await self.database.write(_txn)
+
+    async def finish(
+        self,
+        session_id: str,
+        data: FinishSessionRequest,
+    ) -> FinishSessionResponse:
+        diff_sanitized = sanitize_diff(data.diff or "")
+
+        def _txn() -> FinishSessionResponse:
+            with self.database.session() as session:
+                with session.begin():
+                    model = self.session_repo.get_by_id(session, session_id)
+                    if not model:
+                        raise ApiException(
+                            status_code=404,
+                            code="session_not_found",
+                            message=f"Session with id '{session_id}' not found",
+                        )
+                    now = utc_now_iso()
+                    model.status = "analyzing"
+                    model.completed_at = now
+                    session.flush()
+
+                    comp_input = CompletionInput(
+                        task_id=model.task_id or "",
+                        changed_files=[ChangedFile(path=f.path, change_kind=f.change_kind) for f in model.files],
+                        diff_summary=diff_sanitized,
+                        commits=[CommitSummary(hash=c.commit_hash, message=c.message, authored_at=c.authored_at) for c in model.commits],
+                        agent_summary=data.agent_summary,
+                    )
+                    workflow = KnowledgeExtractionWorkflow()
+                    proposals_data = workflow.extract(comp_input)
+
+                    prop_repo = ProposalRepository()
+                    created_props = []
+                    for pd in proposals_data:
+                        pm = prop_repo.create(
+                            session=session,
+                            project_id=model.project_id,
+                            session_id=model.id,
+                            type=pd["type"],
+                            title=pd["title"],
+                            content=pd["content"],
+                            confidence=pd["confidence"],
+                            evidence=pd["evidence"],
+                            workflow_version=workflow.VERSION,
+                        )
+                        created_props.append(pm.to_schema())
+
+                    append_audit(
+                        session=session,
+                        actor=model.developer or model.agent or "developer",
+                        action="session.finish",
+                        target=f"session:{model.id}",
+                        metadata={"proposals_count": len(created_props)},
+                    )
+
+                    return FinishSessionResponse(
+                        session=model.to_schema(),
+                        job={"type": "extract_knowledge", "status": "completed"},
+                        proposals=[p.model_dump(mode="json") for p in created_props],
+                    )
 
         return await self.database.write(_txn)

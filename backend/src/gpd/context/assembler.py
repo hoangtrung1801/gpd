@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 from typing import Any
 import uuid
 
@@ -12,6 +13,7 @@ from gpd.context.schemas import (
     ContextRequest,
 )
 from gpd.db.engine import Database
+from gpd.knowledge.service import KnowledgeService
 
 
 def new_uuid() -> str:
@@ -96,7 +98,35 @@ class ContextAssembler:
                 )
             )
 
-        # 5. Token budget selection
+        # 5. Query confirmed knowledge items for project
+        try:
+            k_svc = KnowledgeService(self.database)
+            confirmed_items = k_svc.list_items(request.project_id, status="confirmed")
+            query_text = (self.query_builder.build_query(request) or "").lower()
+            query_tokens = set(re.findall(r"\w{3,}", query_text))
+
+            for k_item in confirmed_items:
+                item_text = f"{k_item.title} {k_item.content}".lower()
+                item_tokens = set(re.findall(r"\w{3,}", item_text))
+                overlap_count = len(query_tokens.intersection(item_tokens))
+                score = 0.70 + min(0.25, overlap_count * 0.05)
+                
+                entry_content = f"[{k_item.type.upper()}] {k_item.title}: {k_item.content}"
+                optional.append(
+                    CandidateEntry(
+                        section="requirements_decisions",
+                        content=entry_content,
+                        knowledge_id=k_item.id,
+                        score=score,
+                        score_components={"base": 0.70, "overlap": min(0.25, overlap_count * 0.05)},
+                        selection_reason=f"Confirmed {k_item.type} matching project context",
+                        token_estimate=estimate_tokens(entry_content),
+                    )
+                )
+        except Exception:
+            pass
+
+        # 6. Token budget selection
         selected_candidates, budget_warnings = self.budget.select(
             mandatory=mandatory,
             optional=optional,
@@ -104,7 +134,7 @@ class ContextAssembler:
         )
         warnings.extend(budget_warnings)
 
-        # 6. Build immutable package entries
+        # 7. Build immutable package entries
         entries: list[ContextEntry] = []
         for rank, c in enumerate(selected_candidates, start=1):
             entries.append(
@@ -139,7 +169,7 @@ class ContextAssembler:
             entries=entries,
         )
 
-        # 7. Persist to database
+        # 8. Persist to database
         def _txn():
             with self.database.session() as session:
                 with session.begin():
