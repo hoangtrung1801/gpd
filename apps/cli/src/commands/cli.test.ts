@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { runCli, type CliRuntime } from "../main.js";
 import { ApiClient } from "@gpd/api-client";
 import type {
@@ -14,6 +14,7 @@ import type {
   Task,
 } from "@gpd/contracts";
 import type { GitOps } from "../git.js";
+import { executeInit } from "./init.js";
 
 function createFakeRuntime(overrides: Partial<CliRuntime> = {}): CliRuntime {
   const fakeConfig: GpdConfig = {
@@ -293,6 +294,73 @@ describe("CLI Commands", () => {
         expect(parsed.ok).toBe(false);
         expect(parsed.error.code).toBe("VALIDATION_ERROR");
         expect(parsed.error.message).toContain("exceeds the 2 MiB limit");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("gpd init reconnect", () => {
+    it("connects to the existing remote project on already_exists conflict", async () => {
+      const root = await mkdtemp(join(tmpdir(), "gpd-init-test-"));
+      try {
+        const name = basename(root);
+        const existing = {
+          id: "project-existing",
+          name,
+          created_at: new Date().toISOString(),
+          repositories: [
+            {
+              id: "repo-existing",
+              project_id: "project-existing",
+              root_path: root,
+              remote_url: null,
+              default_branch: "main",
+            },
+          ],
+        };
+        const customFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          const urlStr = String(url);
+          if (urlStr.endsWith("/api/v1/projects") && init?.method === "POST") {
+            return new Response(
+              JSON.stringify({
+                ok: false,
+                data: null,
+                warnings: [],
+                error: { code: "project_already_exists", message: `Project with name '${name}' already exists`, retryable: false },
+              }),
+              { status: 409 }
+            );
+          }
+          return new Response(
+            JSON.stringify({ ok: true, data: [existing], warnings: [], error: null }),
+            { status: 200 }
+          );
+        });
+        const client = new ApiClient({
+          baseUrl: "http://127.0.0.1:7337",
+          fetch: customFetch as unknown as typeof fetch,
+        });
+        const git: GitOps = {
+          getGitRoot: vi.fn(async () => root),
+          getGitBranch: vi.fn(async () => "main"),
+          getGitRemoteUrl: vi.fn(async () => null),
+          getGitDefaultBranch: vi.fn(async () => "main"),
+          getGitChangedFiles: vi.fn(async () => []),
+          getGitRecentCommits: vi.fn(async () => []),
+          getGitSnapshot: vi.fn(async () => ({ branch: "main", changed_files: [], recent_commits: [] })),
+        };
+
+        const result = (await executeInit(client, git, {}, root)) as {
+          project: { id: string; name: string };
+          repository: { id: string };
+        };
+
+        expect(result.project.id).toBe("project-existing");
+        expect(result.repository.id).toBe("repo-existing");
+        const config = JSON.parse(await readFile(join(root, ".gpd", "config.json"), "utf8"));
+        expect(config.projectId).toBe("project-existing");
+        expect(config.repositoryId).toBe("repo-existing");
       } finally {
         await rm(root, { recursive: true, force: true });
       }

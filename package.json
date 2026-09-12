@@ -6,6 +6,7 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
+    "dev:channel": "pnpm --filter @gpd/channel dev",
     "demo": "./scripts/demo.sh"
   },
   "devDependencies": {
@@ -15,7 +16,8 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "esbuild"
+      "esbuild",
+      "@scarf/scarf"
     ]
   }
 }

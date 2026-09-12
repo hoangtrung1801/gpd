@@ -37,6 +37,7 @@ export type Project = {
   name: string;
   team_identifier?: string | null;
   created_at: string;
+  repositories?: Repository[];
 };
 
 export type Repository = {

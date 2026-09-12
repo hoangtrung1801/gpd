@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "channels": [
+    {
+      "name": "gpd-slack",
+      "displayName": "GPD Assistant",
+      "providers": {
+        "slack": {
+          "env": {
+            "botToken": "INTELLIGENCE_CHANNEL_GPD_SLACK_SLACK_BOT_TOKEN",
+            "signingSecret": "INTELLIGENCE_CHANNEL_GPD_SLACK_SLACK_SIGNING_SECRET"
+          }
+        }
+      }
+    }
+  ]
+}

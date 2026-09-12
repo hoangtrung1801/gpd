@@ -305,6 +305,10 @@ export class ApiClient {
   }
 
   // Projects
+  async listProjects(): Promise<ApiEnvelope<Project[]>> {
+    return this.request<Project[]>({ path: "/api/v1/projects" });
+  }
+
   async getProject(projectId: string): Promise<ApiEnvelope<Project>> {
     return this.request<Project>({ path: `/api/v1/projects/${projectId}` });
   }
@@ -318,8 +322,8 @@ export class ApiClient {
       default_branch?: string;
     },
     idempotencyKey?: string
-  ): Promise<ApiEnvelope<{ project: Project; repository: Repository }>> {
-    return this.request<{ project: Project; repository: Repository }>({
+  ): Promise<ApiEnvelope<Project>> {
+    return this.request<Project>({
       method: "POST",
       path: "/api/v1/projects",
       body: payload,

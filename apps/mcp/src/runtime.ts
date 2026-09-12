@@ -2,7 +2,7 @@ import { ApiClient } from "@gpd/api-client";
 import { findProjectConfig } from "@gpd/config";
 import type { GpdConfig } from "@gpd/contracts";
 
-export type McpToolResponse<T = Record<string, unknown>> = {
+export type McpToolResponse<T = Record<string, any>> = {
   content: Array<{ type: "text"; text: string }>;
   structuredContent: T;
   isError?: boolean;
