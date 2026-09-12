@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+import subprocess
 from typing import Any, NamedTuple
 import pytest
 from fastapi import FastAPI
@@ -50,13 +51,16 @@ def db(database: Database) -> Database:
 
 
 @pytest.fixture
-def app(settings: Settings) -> FastAPI:
-    return create_app(settings)
+def app(settings: Settings, database: Database) -> FastAPI:
+    application = create_app(settings)
+    application.state.database = database
+    return application
 
 
 @pytest.fixture
-def client(app: FastAPI) -> Generator[TestClient, None, None]:
+def client(app: FastAPI, database: Database) -> Generator[TestClient, None, None]:
     with TestClient(app) as test_client:
+        app.state.database = database
         yield test_client
 
 
@@ -202,3 +206,28 @@ def old_signed_event(monkeypatch: Any) -> SignedEvent:
         "X-Slack-Signature": sig,
     }
     return SignedEvent(body=body, headers=headers)
+
+
+# --- Git fixtures ---
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "test_repo"
+    repo.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "Tester",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Tester",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "PATH": "/usr/bin:/bin",
+    }
+    subprocess.run(["git", "init", "-b", "feature/payment"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, env=env)
+
+    # Create initial commit
+    (repo / "README.md").write_text("# Test Repo\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo, check=True, env=env)
+    return repo
