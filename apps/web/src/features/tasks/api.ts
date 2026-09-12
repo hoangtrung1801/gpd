@@ -27,6 +27,7 @@ export function createTasksApi(client: ApiClient): TasksApi {
   return {
     async listTasks(params?: TaskFilterParams): Promise<TaskListResponse> {
       const res = await client.listTasks(params);
+      if (Array.isArray(res.data)) return { items: res.data };
       return res.data || { items: [] };
     },
 
