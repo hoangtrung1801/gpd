@@ -1,0 +1,14 @@
+{
+  "model": "text-embedding-3-small",
+  "dimension": 384,
+  "records": [
+    {
+      "input": "expired payment method",
+      "embedding_summary": "deterministic unit vector for test fixtures"
+    },
+    {
+      "input": "checkout bug reproducing on cart update",
+      "embedding_summary": "deterministic unit vector for test fixtures"
+    }
+  ]
+}
