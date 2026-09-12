@@ -8,10 +8,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-
 from gpd.api.errors import ApiEnvelope, ApiError, ApiException
 from gpd.db.engine import Database
 from gpd.db.migrations import run_migrations
+from gpd.llm.openai import OpenAILlmGateway
+from gpd.llm.workflows.bug_extraction import BugExtractionWorkflow
+from gpd.tasks.service import TaskService
+from gpd.conversations.service import ConversationService
+from gpd.integrations.slack.client import SlackClient
+from gpd.integrations.slack.service import SlackService
 from gpd.jobs.runner import JobRunner
 from gpd.projects.service import ProjectService
 from gpd.security.auth import BearerAuthMiddleware
@@ -43,10 +48,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project_service = ProjectService(database)
         job_runner = JobRunner(database)
 
+        openai_key = (
+            resolved.openai_api_key.get_secret_value()
+            if resolved.openai_api_key
+            else None
+        )
+        llm_gateway = OpenAILlmGateway(api_key=openai_key, model=resolved.llm_model)
+        bug_workflow = BugExtractionWorkflow(llm_gateway)
+        task_service = TaskService(database, bug_workflow=bug_workflow)
+        conv_service = ConversationService(database, task_service=task_service)
+
+        bot_tok = (
+            resolved.slack_bot_token.get_secret_value()
+            if resolved.slack_bot_token
+            else None
+        )
+        slack_client = SlackClient(bot_token=bot_tok)
+        slack_service = SlackService(
+            database=database,
+            task_service=task_service,
+            conversation_service=conv_service,
+            slack_client=slack_client,
+            llm_gateway=llm_gateway,
+        )
+
         app.state.database = database
         app.state.project_service = project_service
         app.state.job_runner = job_runner
-
+        app.state.llm_gateway = llm_gateway
+        app.state.task_service = task_service
+        app.state.conversation_service = conv_service
+        app.state.slack_client = slack_client
+        app.state.slack_service = slack_service
         worker_id = f"worker-{uuid.uuid4().hex[:8]}"
         app.state.worker_id = worker_id
         stop_event = asyncio.Event()
@@ -165,4 +198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+try:
+    app = create_app()
+except Exception:
+    # Module-level fallback for pytest or non-configured environments
+    app = create_app(Settings(api_host="127.0.0.1"))
