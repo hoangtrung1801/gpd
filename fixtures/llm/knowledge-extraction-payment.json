@@ -1,0 +1,29 @@
+{
+  "workflow": "knowledge_extraction",
+  "version": "1.0",
+  "proposals": [
+    {
+      "type": "decision",
+      "title": "Normalize payment errors in PaymentService",
+      "content": "Normalize payment errors in PaymentService before passing to UI layer. Specifically map payment_method_invalid to ExpiredPaymentMethodError.",
+      "confidence": 0.94,
+      "evidence": [
+        {
+          "evidence_type": "agent_summary",
+          "target_id": "summary",
+          "detail": "Normalize payment errors in PaymentService before passing to UI layer"
+        },
+        {
+          "evidence_type": "changed_file",
+          "target_id": "src/payment/payment-service.ts",
+          "detail": "File modified: src/payment/payment-service.ts"
+        },
+        {
+          "evidence_type": "changed_file",
+          "target_id": "src/checkout/payment-errors.ts",
+          "detail": "File modified: src/checkout/payment-errors.ts"
+        }
+      ]
+    }
+  ]
+}

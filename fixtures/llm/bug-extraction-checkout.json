@@ -1,0 +1,86 @@
+{
+  "workflow": "bug_extraction",
+  "version": "1.0",
+  "title": {
+    "value": "Checkout hangs on expired card in staging",
+    "confidence": 0.98,
+    "evidence": [
+      { "message_id": "1726137600.000100" }
+    ]
+  },
+  "summary": {
+    "value": "Checkout spinner never ends when expired card submitted",
+    "confidence": 0.95,
+    "evidence": [
+      { "message_id": "1726137600.000100" }
+    ]
+  },
+  "description": {
+    "value": "POST /api/v1/checkout/pay returns payment_method_invalid (400) but UI state keeps loading=true.",
+    "confidence": 0.96,
+    "evidence": [
+      { "message_id": "1726137601.000200" }
+    ]
+  },
+  "reproduction_steps": {
+    "value": [
+      "1. Go to checkout on staging with an expired card",
+      "2. Click Pay Now",
+      "3. POST /api/v1/checkout/pay responds with 400 payment_method_invalid but loading spinner spins indefinitely"
+    ],
+    "confidence": 0.95,
+    "evidence": [
+      { "message_id": "1726137600.000100" },
+      { "message_id": "1726137601.000200" }
+    ]
+  },
+  "actual_behavior": {
+    "value": "UI state keeps loading=true and spinner never stops.",
+    "confidence": 0.99,
+    "evidence": [
+      { "message_id": "1726137601.000200" }
+    ]
+  },
+  "expected_behavior": {
+    "value": "Show banner 'Card expired, please choose another payment method' and unfreeze button.",
+    "confidence": 0.95,
+    "evidence": [
+      { "message_id": "1726137602.000300" }
+    ]
+  },
+  "environment": {
+    "value": "staging",
+    "confidence": 0.9,
+    "evidence": [
+      { "message_id": "1726137603.000400" }
+    ]
+  },
+  "severity": {
+    "value": "high",
+    "confidence": 0.9,
+    "evidence": []
+  },
+  "affected_component": {
+    "value": "payments",
+    "confidence": 0.9,
+    "evidence": [
+      { "message_id": "1726137603.000400" }
+    ]
+  },
+  "technical_clues": {
+    "value": [
+      "src/payment/checkout.ts",
+      "src/payment/payment-service.ts"
+    ],
+    "confidence": 0.9,
+    "evidence": [
+      { "message_id": "1726137603.000400" }
+    ]
+  },
+  "participants": [
+    "U_ALICE",
+    "U_BOB",
+    "U_CHARLIE"
+  ],
+  "acceptance_criteria": null
+}
