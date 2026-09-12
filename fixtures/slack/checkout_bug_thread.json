@@ -1,0 +1,49 @@
+{
+  "token": "verification_token_12345",
+  "team_id": "T_TEST_TEAM",
+  "api_app_id": "A_TEST_APP",
+  "event": {
+    "type": "app_mention",
+    "user": "U_ALICE",
+    "text": "<@U_GPD_BOT> create a bug task from this conversation",
+    "ts": "1726137604.000500",
+    "channel": "C_CHECKOUT",
+    "event_ts": "1726137604.000500",
+    "thread_ts": "1726137600.000100"
+  },
+  "type": "event_callback",
+  "event_id": "Ev_CHECKOUT_001",
+  "event_time": 1726137604,
+  "messages": [
+    {
+      "ts": "1726137600.000100",
+      "user": "U_BOB",
+      "text": "Checkout hangs on expired card in staging. When a user submits an expired card, the spinner never stops.",
+      "thread_ts": "1726137600.000100"
+    },
+    {
+      "ts": "1726137601.000200",
+      "user": "U_CHARLIE",
+      "text": "I checked the network tab: POST /api/v1/checkout/pay returns payment_method_invalid (400) but UI state keeps loading=true.",
+      "thread_ts": "1726137600.000100"
+    },
+    {
+      "ts": "1726137602.000300",
+      "user": "U_ALICE",
+      "text": "Expected behavior is showing a banner 'Card expired, please choose another payment method' and unfreezing the button.",
+      "thread_ts": "1726137600.000100"
+    },
+    {
+      "ts": "1726137603.000400",
+      "user": "U_BOB",
+      "text": "Happens on chrome and mobile web in staging environment. Affects payments component and src/payment/checkout.ts.",
+      "thread_ts": "1726137600.000100"
+    },
+    {
+      "ts": "1726137604.000500",
+      "user": "U_ALICE",
+      "text": "<@U_GPD_BOT> create a bug task from this conversation",
+      "thread_ts": "1726137600.000100"
+    }
+  ]
+}
