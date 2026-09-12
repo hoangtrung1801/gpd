@@ -76,7 +76,22 @@ for fname, stype, title, key in [
     source_ids[stype] = sid
     print(f"source {fname}:", s, sid)
 
-# 3. BUG-1 (skip if present)
+# 2b. This repo's own documents (dogfood): the dev database hosts a single
+# project per database, so the GPD docs live alongside the demo sources.
+for rel, stype, title, key in [
+    ("docs/GPD \u2014 Product Requirements Document.md", "prd", "GPD Product Requirements", "seed-gpd-prd"),
+    ("docs/GPD \u2014 Functional Requirements Document.md", "frd", "GPD Functional Requirements", "seed-gpd-frd"),
+    ("docs/superpowers/specs/2026-09-12-gpd-architecture-design.md", "adr", "GPD Architecture Design", "seed-gpd-spec"),
+    ("docs/superpowers/plans/2026-09-12-gpd-local-platform.md", "note", "GPD Implementation Plan", "seed-gpd-plan"),
+]:
+    content = (ROOT / rel).read_text()
+    s, res = api(
+        "POST", f"/api/v1/projects/{pid}/sources",
+        {"type": stype, "title": title, "content": content,
+         "canonical_ref": rel, "author": "seed"},
+        key=key,
+    )
+    print(f"source {rel}:", s, (res.get("data") or {}).get("source_id"))
 tasks = get_list("/api/v1/tasks")
 bug = next((t for t in tasks if t.get("public_id") == "BUG-1"), None)
 if bug is None:
