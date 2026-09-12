@@ -18,6 +18,22 @@ importers:
         specifier: ^3.0.7
         version: 3.2.7(@types/node@22.20.2)
 
+  packages/api-client:
+    dependencies:
+      '@gpd/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@types/node':
+        specifier: ^22.13.9
+        version: 22.20.2
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.7(@types/node@22.20.2)
+
   packages/config:
     dependencies:
       '@gpd/contracts':
