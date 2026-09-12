@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.engine import Connection
 
 from gpd.db.models import AuditEvent, new_uuid, utc_now_iso
+from gpd.security.redaction import default_redactor
 
 
 def append(
@@ -39,13 +40,18 @@ def append(
     if not actor or not action or not target:
         raise ValueError("actor, action, and target are required for audit event")
 
+    # Redact sensitive information before persistence
+    actor = default_redactor.redact(actor).text
+    action = default_redactor.redact(action).text
+    target = default_redactor.redact(target).text
+
     metadata_str: str | None = None
     if metadata is not None:
-        if isinstance(metadata, str):
-            metadata_str = metadata
+        redacted_meta = default_redactor.redact_data(metadata)
+        if isinstance(redacted_meta, str):
+            metadata_str = redacted_meta
         else:
-            metadata_str = json.dumps(metadata)
-
+            metadata_str = json.dumps(redacted_meta)
     event_id = new_uuid()
     created_at = utc_now_iso()
 
@@ -103,3 +109,31 @@ class AuditService:
             connection=connection,
             session=session,
         )
+
+    def query(
+        self,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        if not self.database:
+            return []
+        with self.database.session() as session:
+            stmt = session.query(AuditEvent)
+            if actor:
+                stmt = stmt.filter(AuditEvent.actor == actor)
+            if action:
+                stmt = stmt.filter(AuditEvent.action == action)
+            if target:
+                stmt = stmt.filter(AuditEvent.target == target)
+            stmt = stmt.order_by(AuditEvent.created_at.desc()).offset(offset).limit(limit)
+            return list(stmt.all())
+
+    def get(self, event_id: str) -> AuditEvent | None:
+        if not self.database:
+            return None
+        with self.database.session() as session:
+            return session.query(AuditEvent).filter(AuditEvent.id == event_id).first()
