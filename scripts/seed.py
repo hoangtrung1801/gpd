@@ -170,9 +170,10 @@ async def make_sessions():
 
 session_ids = asyncio.run(make_sessions())
 
-# 5. Knowledge proposal (from fixture recording)
+# 5. Knowledge proposals (from fixture recording)
 proposals = get_list("/api/v1/knowledge/proposals")
-if not any(p.get("title") == "Normalize payment errors in PaymentService" for p in proposals):
+titles = {p.get("title") for p in proposals}
+if "Normalize payment errors in PaymentService" not in titles:
     from gpd.knowledge.proposals import ProposalRepository
 
     recording = json.loads((ROOT / "fixtures" / "llm" / "knowledge-extraction-payment.json").read_text())
@@ -200,6 +201,44 @@ if not any(p.get("title") == "Normalize payment errors in PaymentService" for p 
     print("proposal created:", asyncio.run(make_proposal()))
 else:
     print("proposal reused")
+if "Payment retries reduced to one" not in titles:
+    async def make_second_proposal():
+        from gpd.knowledge.proposals import ProposalRepository
+        db = Database.open(ROOT / ".gpd" / "gpd.db")
+
+        def _write():
+            with db.session() as session:
+                with session.begin():
+                    return ProposalRepository().create(
+                        session, project_id=pid, type="decision",
+                        title="Payment retries reduced to one",
+                        content="Retries were reduced to one after the Slack decision; do not reintroduce triple-retry logic.",
+                        confidence=0.88,
+                        session_id=session_ids[0] if session_ids else None,
+                        evidence=[{"evidence_type": "conversation",
+                                   "target_id": "C123",
+                                   "detail": "Retries were reduced to one yesterday"}],
+                        workflow_version="1.0",
+                    ).id
+
+        prop_id = await db.write(_write)
+        db.close()
+        return prop_id
+
+    print("second proposal created:", asyncio.run(make_second_proposal()))
+else:
+    print("second proposal reused")
+# Human confirmation of the first proposal -> confirmed knowledge item
+proposals = get_list("/api/v1/knowledge/proposals")
+first_pending = next((p for p in proposals
+                      if p.get("title") == "Normalize payment errors in PaymentService"
+                      and p.get("status") == "pending"), None)
+if first_pending is not None:
+    s, res = api("POST", f"/api/v1/knowledge/proposals/{first_pending['id']}/confirm",
+                 {"actor": "alice", "note": "Verified against PaymentService implementation."})
+    print("proposal confirmed:", s, (res.get("data") or {}).get("status"))
+else:
+    print("proposal already reviewed")
 
 # 6. Contradictory-knowledge conflict (retry policy: PRD vs ADR)
 conflicts = get_list("/api/v1/conflicts")
