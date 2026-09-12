@@ -42,64 +42,11 @@ class KnowledgeItem(BaseModel):
     updated_at: str
 
 
-class KnowledgeItemModel(Base):
-    __tablename__ = "knowledge_items"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    project_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="confirmed", nullable=False)
-    created_at: Mapped[str] = mapped_column(Text, default=utc_now_iso, nullable=False)
-    updated_at: Mapped[str] = mapped_column(Text, default=utc_now_iso, nullable=False)
-
-    evidence: Mapped[list["KnowledgeEvidenceModel"]] = relationship(
-        "KnowledgeEvidenceModel", back_populates="knowledge_item", cascade="all, delete-orphan"
-    )
-
-    def to_schema(self) -> KnowledgeItem:
-        return KnowledgeItem(
-            id=self.id,
-            project_id=self.project_id,
-            type=self.type,
-            title=self.title,
-            content=self.content,
-            confidence=self.confidence,
-            status=self.status,
-            evidence=[e.to_schema() for e in self.evidence],
-            created_at=self.created_at,
-            updated_at=self.updated_at,
-        )
-
-
-class KnowledgeEvidenceModel(Base):
-    __tablename__ = "knowledge_evidence"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    knowledge_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("knowledge_items.id", ondelete="CASCADE"), nullable=False
-    )
-    evidence_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    target_id: Mapped[str] = mapped_column(Text, nullable=False)
-    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(Text, default=utc_now_iso, nullable=False)
-
-    knowledge_item: Mapped["KnowledgeItemModel"] = relationship(
-        "KnowledgeItemModel", back_populates="evidence"
-    )
-
-    def to_schema(self) -> KnowledgeEvidenceSchema:
-        return KnowledgeEvidenceSchema(
-            id=self.id,
-            knowledge_id=self.knowledge_id,
-            evidence_type=self.evidence_type,
-            target_id=self.target_id,
-            detail=self.detail,
-            created_at=self.created_at,
-        )
-
+from gpd.sources.models import (
+    KnowledgeItem as KnowledgeItemModel,
+    KnowledgeEvidence as KnowledgeEvidenceModel,
+)
+KnowledgeItemSchema = KnowledgeItem
 
 class KnowledgeService:
     def __init__(self, database: Database):

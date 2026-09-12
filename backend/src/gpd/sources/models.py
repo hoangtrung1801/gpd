@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 import uuid
 
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -86,6 +87,21 @@ class KnowledgeItem(Base):
         "KnowledgeChunk", back_populates="knowledge_item", cascade="all, delete-orphan"
     )
 
+    def to_schema(self) -> Any:
+        from gpd.knowledge.service import KnowledgeItem as KnowledgeItemSchema
+        return KnowledgeItemSchema(
+            id=self.id,
+            project_id=self.project_id,
+            type=self.type,
+            title=self.title,
+            content=self.content,
+            confidence=self.confidence,
+            status=self.status,
+            evidence=[e.to_schema() for e in self.evidence] if self.evidence else [],
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
 
 class KnowledgeEvidence(Base):
     __tablename__ = "knowledge_evidence"
@@ -101,12 +117,25 @@ class KnowledgeEvidence(Base):
         String(36), ForeignKey("sources.id", ondelete="CASCADE"), nullable=True
     )
     support_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, default=utc_now_iso, nullable=False)
 
     knowledge_item: Mapped["KnowledgeItem"] = relationship(
         "KnowledgeItem", back_populates="evidence"
     )
 
+    def to_schema(self) -> Any:
+        from gpd.knowledge.service import KnowledgeEvidenceSchema
+        return KnowledgeEvidenceSchema(
+            id=self.id,
+            knowledge_id=self.knowledge_id,
+            evidence_type=self.evidence_type or self.support_type or "reference",
+            target_id=self.target_id or self.source_id or "",
+            detail=self.detail,
+            created_at=self.created_at,
+        )
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
