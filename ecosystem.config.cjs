@@ -23,5 +23,16 @@ module.exports = {
         GPD_ACCESS_TOKEN: "dev-local-token",
       },
     },
+    {
+      name: "gpd-channel",
+      script: "pnpm",
+      args: "--filter @gpd/channel start",
+      cwd: "/home/work/gpd",
+      env: {
+        PORT: "4042",
+        GPD_API_URL: "http://100.67.176.76:4040",
+        GPD_ACCESS_TOKEN: "dev-local-token",
+      },
+    },
   ],
 };

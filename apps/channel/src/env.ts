@@ -47,3 +47,26 @@ export function requiredEnv(name: string): string {
   }
   return val;
 }
+
+export function getTelegramBotToken(): string | undefined {
+  return getEnv("TELEGRAM_BOT_TOKEN");
+}
+
+export function getGpdApiUrl(): string {
+  if (process.env.GPD_API_URL) return process.env.GPD_API_URL;
+  const host = process.env.GPD_API_HOST || "127.0.0.1";
+  const port = process.env.GPD_API_PORT || "4040";
+  return `http://${host}:${port}`;
+}
+
+export function getGpdAccessToken(): string | undefined {
+  return getEnv("GPD_ACCESS_TOKEN");
+}
+
+export function getOpenAiApiKey(): string | undefined {
+  return getEnv("OPENAI_API_KEY");
+}
+
+export function getModelName(): string {
+  return (getEnv("GPD_LLM_MODEL") || getEnv("MODEL") || "gpt-4o").trim();
+}

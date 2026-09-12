@@ -44,8 +44,11 @@ export function registerTaskTools(server: McpServer, runtime: McpRuntime): void 
           limit: args.limit,
         });
 
-        const tasks = response.data?.items ?? [];
-        const nextCursor = response.data?.next_cursor ?? null;
+        const raw = response.data;
+        const tasks = Array.isArray(raw)
+          ? raw
+          : raw?.items ?? [];
+        const nextCursor = Array.isArray(raw) ? null : (raw?.next_cursor ?? null);
 
         const summary = tasks.length > 0
           ? tasks.map((t) => `[${t.public_id || t.id}] ${t.title} (${t.status}, ${t.priority})`).join("\n")

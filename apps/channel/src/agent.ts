@@ -1,93 +1,85 @@
-import { AbstractAgent } from "@ag-ui/client";
-import type { BaseEvent, RunAgentInput } from "@ag-ui/core";
-import { Observable, type Subscription } from "rxjs";
-import { BuiltInAgent } from "@copilotkit/runtime/v2";
+import { generateText, isStepCount } from "ai";
 import { resolveModel } from "./model.js";
+import {
+  formatTaskCardTool,
+  listTasksTool,
+  proposeActionTool,
+  searchKnowledgeTool,
+} from "./tools.js";
 
-export const GPD_SYSTEM_PROMPT = `You are the GPD (Grounded Project Developer) AI assistant living in Slack.
+export const GPD_SYSTEM_PROMPT = `You are the GPD (Grounded Project Developer) AI assistant living in Telegram.
 You help engineering teams triage bugs, review architecture decisions (ADR), check specifications (PRD/FRD), retrieve context packages, and inspect project tasks.
-Always be concise, professional, and actionable. When appropriate, use structured cards or propose decisions for review.`;
+Always be concise, professional, and actionable.
 
-export function makeInnerAgent(threadId: string) {
-  const agent = new BuiltInAgent({
-    model: resolveModel(),
-    prompt: GPD_SYSTEM_PROMPT,
-    maxSteps: 10,
+Available tools:
+- list_tasks: Query tasks and bugs from GPD.
+- search_knowledge: Search specifications (PRD, FRD, ADR) and confirmed knowledge.
+- propose_action: Suggest changes, fixes, or rollouts for human approval.
+- format_task_card: Render a structured task card with priority, status, and summary.
+
+Formatting guidelines:
+- Telegram supports HTML formatting. Use <b>bold</b>, <i>italic</i>, <code>code</code>, or <pre>code block</pre>.
+- Avoid markdown like **bold** or \`code\`; use HTML tags instead.
+- Do not output unescaped < or > characters in normal prose; use &lt; and &gt;.`;
+
+export interface AgentRunOptions {
+  prompt: string;
+  history?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+}
+
+export interface AgentRunResult {
+  text: string;
+  proposals: Array<{ proposalId: string; action: string; description: string }>;
+  toolCallsCount: number;
+}
+
+export async function runGpdAgent({
+  prompt,
+  history = [],
+}: AgentRunOptions): Promise<AgentRunResult> {
+  const model = resolveModel();
+  const messages = [
+    ...history.map((m) => ({ role: m.role, content: m.content })),
+    { role: "user" as const, content: prompt },
+  ];
+
+  const result = await generateText({
+    model,
+    system: GPD_SYSTEM_PROMPT,
+    messages,
+    tools: {
+      list_tasks: listTasksTool,
+      search_knowledge: searchKnowledgeTool,
+      propose_action: proposeActionTool,
+      format_task_card: formatTaskCardTool,
+    },
+    stopWhen: isStepCount(5),
   });
-  agent.threadId = threadId;
-  return agent;
-}
 
-export type ChannelAgentFactory = (threadId: string) => AbstractAgent;
-
-/**
- * Channel-only facade that keeps AG-UI transcript/state on the outer agent while
- * delegating each low-level run to a fresh BuiltInAgent instance.
- */
-export class ChannelRunAgent extends AbstractAgent {
-  private activeInner: AbstractAgent | undefined;
-
-  constructor(
-    private agentFactory: ChannelAgentFactory = makeInnerAgent,
-    threadId?: string,
-  ) {
-    super({ threadId });
-  }
-
-  override run(input: RunAgentInput): Observable<BaseEvent> {
-    return new Observable<BaseEvent>((subscriber) => {
-      let inner: AbstractAgent | undefined;
-      let subscription: Subscription | undefined;
-
-      const release = () => {
-        if (this.activeInner === inner) {
-          this.activeInner = undefined;
+  // Check if any proposals were generated during the steps
+  const proposals: Array<{ proposalId: string; action: string; description: string }> = [];
+  for (const step of result.steps) {
+    for (const toolResult of step.toolResults) {
+      if (toolResult.toolName === "propose_action" && toolResult.output) {
+        const res = toolResult.output as {
+          proposalId?: string;
+          action?: string;
+          description?: string;
+        };
+        if (res.proposalId && res.action) {
+          proposals.push({
+            proposalId: res.proposalId,
+            action: res.action,
+            description: res.description || "",
+          });
         }
-      };
-
-      try {
-        inner = this.agentFactory(input.threadId);
-        inner.threadId = input.threadId;
-        this.activeInner = inner;
-        subscription = inner.run(input).subscribe({
-          next: (event) => {
-            subscriber.next(event);
-          },
-          error: (error) => {
-            release();
-            subscriber.error(error);
-          },
-          complete: () => {
-            release();
-            subscriber.complete();
-          },
-        });
-      } catch (error) {
-        release();
-        subscriber.error(error);
       }
-
-      return () => {
-        subscription?.unsubscribe();
-        inner?.abortRun();
-        release();
-      };
-    });
+    }
   }
 
-  override abortRun() {
-    this.activeInner?.abortRun();
-    super.abortRun();
-  }
-
-  override clone(): ChannelRunAgent {
-    const cloned = super.clone() as ChannelRunAgent;
-    cloned.agentFactory = this.agentFactory;
-    cloned.activeInner = undefined;
-    return cloned;
-  }
-}
-
-export function makeChannelAgent(threadId: string) {
-  return new ChannelRunAgent(makeInnerAgent, threadId);
+  return {
+    text: result.text,
+    proposals,
+    toolCallsCount: result.steps.reduce((acc, s) => acc + s.toolCalls.length, 0),
+  };
 }

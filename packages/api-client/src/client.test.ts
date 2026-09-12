@@ -149,4 +149,21 @@ describe("ApiClient", () => {
       }
     });
   });
+
+  describe("listTasks", () => {
+    it("normalizes array response into items object", async () => {
+      const tasks = [
+        { id: "1", public_id: "BUG-1", title: "Task 1", status: "open", priority: "high" },
+      ];
+      const fakeFetch = vi.fn(async () => {
+        return new Response(JSON.stringify({ ok: true, data: tasks, warnings: [], error: null }));
+      });
+      const client = new ApiClient({ baseUrl: "http://api.local", fetch: fakeFetch as unknown as typeof fetch });
+      const res = await client.listTasks({ project_id: "proj-1" });
+      expect(res.data).toEqual({
+        items: tasks,
+        next_cursor: null,
+      });
+    });
+  });
 });

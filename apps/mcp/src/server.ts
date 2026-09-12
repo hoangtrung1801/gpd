@@ -73,7 +73,17 @@ export function createGpdMcpServer(
   config?: GpdConfig,
   configPath?: string
 ): GpdMcpServer {
-  const activeClient = client || new ApiClient({ baseUrl: config?.apiUrl || "http://127.0.0.1:7337" });
+  const headers: Record<string, string> = {};
+  const token = process.env.GPD_ACCESS_TOKEN;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const activeClient =
+    client ||
+    new ApiClient({
+      baseUrl: config?.apiUrl || process.env.GPD_API_URL || "http://127.0.0.1:7337",
+      headers,
+    });
   return new GpdMcpServer({ client: activeClient, config, configPath });
 }
 

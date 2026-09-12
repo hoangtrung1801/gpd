@@ -1,64 +1,110 @@
-import { createServer } from "node:http";
-import { CopilotKitIntelligence, CopilotRuntime } from "@copilotkit/runtime/v2";
-import { createCopilotNodeListener } from "@copilotkit/runtime/v2/node";
-import { channel } from "./channel.js";
-import { getEnv, requiredEnv } from "./env.js";
+import { pathToFileURL } from "node:url";
+import { createServer, type Server } from "node:http";
+import { webhookCallback, type Bot } from "grammy";
+import { createTelegramBot } from "./bot.js";
+import { getEnv, getTelegramBotToken } from "./env.js";
 
-const apiKey = requiredEnv("INTELLIGENCE_API_KEY");
+let server: Server | undefined;
+let botInstance: Bot | undefined;
 
-const intelligence = new CopilotKitIntelligence({
-  apiKey,
-  apiUrl: getEnv("INTELLIGENCE_API_URL"),
-  wsUrl: getEnv("INTELLIGENCE_GATEWAY_WS_URL") || "wss://gateway.intelligence.copilotkit.ai",
-});
-const runtime = new CopilotRuntime({
-  agents: {},
-  intelligence,
-  channels: [channel],
-});
-
-let teardown: (() => Promise<void>) | undefined;
 const shutdown = async () => {
-  await teardown?.();
+  console.log("\n  Gracefully shutting down Telegram bot...");
+  if (botInstance) {
+    try {
+      await botInstance.stop();
+    } catch {
+      // Ignore stop errors during shutdown
+    }
+  }
+  if (server?.listening) {
+    server.close();
+  }
   process.exit(0);
 };
+
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
-const listener = createCopilotNodeListener({ runtime, basePath: "/api/copilotkit" });
-const channels = listener.channels;
-const server = createServer(listener);
-
-teardown = async () => {
-  await channels.stop();
-  if (server.listening) server.close();
-};
-
 export async function startServer(port = Number(process.env.PORT ?? 3000)) {
-  await channels.ready({ timeoutMs: 30_000 });
+  const token = getTelegramBotToken();
 
-  const status = channels.status();
-  if (status.overall !== "online") {
+  if (!token) {
     console.error(
-      `\n  Channel is not online: ${JSON.stringify(status)}\n` +
-        `  → 'setup_required' means the provider side is unfinished.\n`
+      "\n  ❌ Telegram bot token is not configured (TELEGRAM_BOT_TOKEN missing).\n" +
+        "  To connect to Telegram:\n" +
+        "    1. Open Telegram and search for @BotFather.\n" +
+        "    2. Send /newbot and follow prompts to get an API token.\n" +
+        "    3. Set TELEGRAM_BOT_TOKEN=<your-token> in your .env file.\n" +
+        "    4. Run: pnpm dev:channel (or pnpm --filter @gpd/channel dev)\n",
     );
-    if (teardown) {
-      await teardown();
-    }
-    process.exit(1);
+    throw new Error("TELEGRAM_BOT_TOKEN is required.");
   }
 
-  return new Promise<void>((resolve) => {
-    server.listen(port, () => {
-      console.log(`\n  ✓ Channel "${process.env.CHANNEL_CODE}" online — listening on :${port}`);
-      console.log(`    Invite the bot to a channel (/invite @yourbot), then @-mention it.\n`);
-      resolve();
+  const bot = createTelegramBot(token);
+  botInstance = bot;
+
+  const webhookUrl = getEnv("TELEGRAM_WEBHOOK_URL");
+
+  if (webhookUrl) {
+    // Webhook mode
+    await bot.api.setWebhook(webhookUrl);
+    console.log(`\n  ✓ Telegram webhook set to: ${webhookUrl}`);
+
+    const handler = webhookCallback(bot, "http");
+    server = createServer((req, res) => {
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", mode: "webhook" }));
+        return;
+      }
+      handler(req, res);
     });
-  });
+
+    return new Promise<void>((resolve) => {
+      server!.listen(port, () => {
+        console.log(`  ✓ Webhook listener active on :${port}`);
+        resolve();
+      });
+    });
+  } else {
+    // Long polling mode (default)
+    const botInfo = await bot.api.getMe();
+    console.log(`\n  ✓ Connected to Telegram as @${botInfo.username} (${botInfo.first_name})`);
+    console.log(`    Chat with the bot: https://t.me/${botInfo.username}\n`);
+
+    // Optional lightweight health server
+    server = createServer((req, res) => {
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", bot: botInfo.username, mode: "polling" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => {
+      server!.listen(port, () => {
+        console.log(`  ✓ Health check endpoint listening on :${port}/health`);
+        resolve();
+      });
+    });
+
+    // Start long polling
+    bot.start({
+      onStart: (info) => {
+        console.log(`  ✓ Polling active for @${info.username}. Ready to receive messages.\n`);
+      },
+    });
+  }
 }
 
 // If run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  await startServer();
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  try {
+    await startServer();
+  } catch (err) {
+    console.error("Fatal startup error:", err);
+    process.exit(1);
+  }
 }

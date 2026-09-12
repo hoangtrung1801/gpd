@@ -14,7 +14,32 @@ export async function executeTaskList(
     cursor: filters.cursor,
   });
 
-  return response.data ?? { items: [] };
+  const raw = response.data;
+  let items: Task[] = [];
+  let next_cursor: string | null = null;
+
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (raw && typeof raw === "object") {
+    if ("items" in raw && Array.isArray(raw.items)) {
+      items = raw.items;
+    }
+    if ("next_cursor" in raw && typeof raw.next_cursor === "string") {
+      next_cursor = raw.next_cursor;
+    }
+  }
+
+  if (filters.query) {
+    const q = filters.query.toLowerCase();
+    items = items.filter(
+      (t) =>
+        t.title?.toLowerCase().includes(q) ||
+        t.description?.toLowerCase().includes(q) ||
+        t.public_id?.toLowerCase().includes(q)
+    );
+  }
+
+  return { items, next_cursor };
 }
 
 export async function executeTaskShow(

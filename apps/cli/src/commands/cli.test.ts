@@ -98,6 +98,26 @@ function createFakeRuntime(overrides: Partial<CliRuntime> = {}): CliRuntime {
       };
       return new Response(JSON.stringify(task));
     }
+    if (urlStr.includes("/api/v1/tasks")) {
+      const tasks: ApiEnvelope<Task[]> = {
+        ok: true,
+        data: [
+          {
+            id: "task-uuid-1",
+            project_id: "project-1",
+            public_id: "BUG-1",
+            title: "Payment gateway timeout",
+            description: "Stripe calls time out under load",
+            status: "in_progress",
+            priority: "high",
+            created_at: new Date().toISOString(),
+          },
+        ],
+        warnings: [],
+        error: null,
+      };
+      return new Response(JSON.stringify(tasks));
+    }
 
     if (urlStr.includes("/api/v1/sessions?project_id=project-1") || urlStr.includes("/api/v1/sessions")) {
       const session: DeveloperSession = {
@@ -196,6 +216,15 @@ describe("CLI Commands", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("# Context Package");
       expect(result.stdout).toContain("Fix the checkout timeout");
+    });
+
+    it("bare gpd task list prints human readable task list", async () => {
+      const runtime = createFakeRuntime();
+      const result = await runCli(["task", "list"], runtime);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("[BUG-1] Payment gateway timeout (in_progress, high)");
+      expect(result.stdout).not.toContain("No tasks found");
     });
 
     it("bare gpd finish works without requiring --summary", async () => {

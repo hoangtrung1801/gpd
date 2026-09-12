@@ -50,12 +50,18 @@ export async function resolveMcpRuntime(
     }
   }
 
+  const headers: Record<string, string> = {};
+  const token = process.env.GPD_ACCESS_TOKEN;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const client =
     customClient ||
     new ApiClient({
       baseUrl: config?.apiUrl || process.env.GPD_API_URL || "http://127.0.0.1:7337",
+      headers,
     });
-
   return {
     client,
     config,

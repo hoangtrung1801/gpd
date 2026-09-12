@@ -215,7 +215,8 @@ export async function runCli(
           });
         }
         const result = await executeTaskList(client, config, opts);
-        const text = (result.items || [])
+        const items = Array.isArray(result) ? result : (result.items || []);
+        const text = items
           .map((t) => `[${t.public_id || t.id}] ${t.title} (${t.status}, ${t.priority})`)
           .join("\n") || "No tasks found";
         handleSuccess(result, text);

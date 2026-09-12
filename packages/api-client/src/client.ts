@@ -360,10 +360,22 @@ export class ApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<ApiEnvelope<{ items: Task[]; next_cursor?: string | null }>> {
-    return this.request<{ items: Task[]; next_cursor?: string | null }>({
+    const res = await this.request<{ items: Task[]; next_cursor?: string | null } | Task[]>({
       path: "/api/v1/tasks",
       query,
     });
+    if (res.data) {
+      if (Array.isArray(res.data)) {
+        return {
+          ...res,
+          data: {
+            items: res.data,
+            next_cursor: null,
+          },
+        };
+      }
+    }
+    return res as ApiEnvelope<{ items: Task[]; next_cursor?: string | null }>;
   }
 
   async getTask(taskRef: string): Promise<ApiEnvelope<Task>> {
