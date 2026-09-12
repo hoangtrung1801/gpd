@@ -136,6 +136,95 @@ else:
     print("BUG-1 reused:", bug["id"])
     bug_id, bug_public = bug["id"], bug["public_id"]
 
+# 3b. Two more bugs from their own threads (evidence stays thread-scoped)
+EXTRA_BUGS = [
+    {
+        "key": "seed-bug-2",
+        "public_id": "BUG-2",
+        "channel": "C124",
+        "title": "Retry-storm thread",
+        "messages": [
+            ("1726220000.000100", "U_DANA", "Checkout retried the expired card three times in a row."),
+            ("1726220001.000200", "U_BOB", "That is the old triple-retry in PaymentService, ADR says one retry now."),
+            ("1726220002.000300", "U_DANA", "@GPD create a bug from this conversation."),
+        ],
+        "extraction": {
+            "title": {"value": "Expired card retried three times", "confidence": 0.93, "evidence": [{"message_id": "1726220000.000100"}]},
+            "summary": {"value": "Old triple-retry path still fires for expired cards", "confidence": 0.9, "evidence": [{"message_id": "1726220000.000100"}]},
+            "description": {"value": "PaymentService retries expired-card charges 3x instead of once per the ADR.", "confidence": 0.92, "evidence": [{"message_id": "1726220001.000200"}]},
+            "actual_behavior": {"value": "Three charges attempted, three payment_method_invalid errors.", "confidence": 0.94, "evidence": [{"message_id": "1726220000.000100"}]},
+            "expected_behavior": {"value": "Single attempt, then expired-card banner.", "confidence": 0.9, "evidence": [{"message_id": "1726220001.000200"}]},
+            "environment": {"value": "staging", "confidence": 0.85, "evidence": []},
+            "severity": {"value": "medium", "confidence": 0.88, "evidence": []},
+            "affected_component": {"value": "payments", "confidence": 0.9, "evidence": [{"message_id": "1726220001.000200"}]},
+            "technical_clues": {"value": ["src/payment/payment-service.ts"], "confidence": 0.88, "evidence": [{"message_id": "1726220001.000200"}]},
+            "participants": ["U_DANA", "U_BOB"],
+            "acceptance_criteria": None,
+        },
+    },
+    {
+        "key": "seed-bug-3",
+        "public_id": "BUG-3",
+        "channel": "C125",
+        "title": "Mobile banner thread",
+        "messages": [
+            ("1726300000.000100", "U_QA", "On mobile checkout the expired-card banner never shows, just a spinner."),
+            ("1726300001.000200", "U_ALICE", "Probably the banner component is not wired in the mobile flow."),
+            ("1726300002.000300", "U_QA", "@GPD create a bug from this conversation."),
+        ],
+        "extraction": {
+            "title": {"value": "Expired-card banner missing on mobile", "confidence": 0.9, "evidence": [{"message_id": "1726300000.000100"}]},
+            "summary": {"value": "Mobile checkout omits the expired-card error banner", "confidence": 0.88, "evidence": [{"message_id": "1726300000.000100"}]},
+            "description": {"value": "Mobile checkout flow does not render the expired-card banner; spinner persists.", "confidence": 0.9, "evidence": [{"message_id": "1726300000.000100"}]},
+            "actual_behavior": {"value": "Spinner persists, no banner on small screens.", "confidence": 0.91, "evidence": [{"message_id": "1726300000.000100"}]},
+            "expected_behavior": {"value": "Show the same expired-card banner as desktop.", "confidence": 0.89, "evidence": [{"message_id": "1726300001.000200"}]},
+            "environment": {"value": "staging mobile web", "confidence": 0.8, "evidence": []},
+            "severity": {"value": "low", "confidence": 0.85, "evidence": []},
+            "affected_component": {"value": "checkout-ui", "confidence": 0.87, "evidence": [{"message_id": "1726300001.000200"}]},
+            "technical_clues": {"value": ["src/checkout/payment-errors.ts"], "confidence": 0.85, "evidence": [{"message_id": "1726300001.000200"}]},
+            "participants": ["U_QA", "U_ALICE"],
+            "acceptance_criteria": None,
+        },
+    },
+]
+
+
+async def make_extra_bug(spec):
+    from gpd.conversations.schemas import ConversationCreate, ConversationMessageCreate
+    from gpd.conversations.service import ConversationService
+    from gpd.db.engine import Database
+    from gpd.llm.recording import FakeLlmGateway
+    from gpd.llm.workflows.bug_extraction import BugExtraction, BugExtractionWorkflow
+    from gpd.tasks.service import TaskService
+
+    db = Database.open(ROOT / ".gpd" / "gpd.db")
+    conv_svc = ConversationService(db)
+    conv = await conv_svc.save_conversation(ConversationCreate(
+        channel_id=spec["channel"], thread_ts=spec["messages"][0][0],
+        title=spec["title"], project_id=pid,
+        messages=[ConversationMessageCreate(
+            external_message_id=ts, author=user, text=text,
+            timestamp=ts, ordering=i,
+        ) for i, (ts, user, text) in enumerate(spec["messages"])],
+    ))
+    extraction = BugExtraction.model_validate(spec["extraction"])
+    llm = FakeLlmGateway()
+    llm.respond(extraction)
+    svc = TaskService(db, BugExtractionWorkflow(llm))
+    detail = await svc.create_bug_from_conversation(conv, idempotency_key=spec["key"])
+    db.close()
+    return detail
+
+
+tasks = get_list("/api/v1/tasks")
+have = {t.get("public_id") for t in tasks}
+for spec in EXTRA_BUGS:
+    if spec["public_id"] in have:
+        print(spec["public_id"], "reused")
+    else:
+        detail = asyncio.run(make_extra_bug(spec))
+        print("BUG created:", detail.public_id, "-", detail.title)
+
 # 4. Sessions (alice + overlapping bob)
 from gpd.db.engine import Database
 from gpd.sessions.schemas import ChangedFile, StartSessionRequest
