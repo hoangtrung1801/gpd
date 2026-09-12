@@ -1,0 +1,30 @@
+services:
+  gpd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gpd:latest
+    container_name: gpd
+    ports:
+      - "127.0.0.1:7337:7337"
+    environment:
+      - GPD_DATABASE_PATH=/data/gpd.db
+      - GPD_API_HOST=0.0.0.0
+      - GPD_API_PORT=7337
+      - GPD_ACCESS_TOKEN=${GPD_ACCESS_TOKEN:-default-local-token}
+      - GPD_SLACK_SIGNING_SECRET=${GPD_SLACK_SIGNING_SECRET:-}
+      - GPD_SLACK_BOT_TOKEN=${GPD_SLACK_BOT_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - gpd-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7337/health/live')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  gpd-data:
+    name: gpd-data

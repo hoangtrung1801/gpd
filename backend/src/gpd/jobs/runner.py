@@ -43,6 +43,8 @@ class JobRunner:
         return await self.database.write(_requeue)
 
     async def run_once(self, worker_id: str) -> bool:
+        if not self._handlers:
+            return False
         # 1. Claim a job atomically
         def _claim():
             with self.database.session() as session:
