@@ -48,7 +48,7 @@ export function createConflictsApi(client: ApiClient): ConflictsApi {
   return {
     async listConflicts(projectId: string, state?: string): Promise<Conflict[]> {
       const res = await client.request<Conflict[]>({
-        path: `/api/v1/projects/${projectId}/conflicts`,
+        path: `/api/v1/conflicts?project_id=${projectId}`,
         query: state ? { state } : undefined,
       });
       return res.data || [];
