@@ -30,7 +30,7 @@ The system includes a backend server, browser interface, developer CLI, and agen
 
 - Local project registration and repository association.
 - Markdown, PRD, FRD, ADR, task, Slack-thread, and manual-note ingestion.
-- Slack app installation, signed event handling, thread retrieval, natural-language invocation, and result posting.
+- Slack webhook ingestion, signed event handling, thread retrieval, natural-language invocation, and result posting (full Slack app install/OAuth flow deferred; configuration status only).
 - Structured bug creation from a Slack thread with source provenance and confidence.
 - Persistent project memory in SQLite.
 - Hybrid lexical and semantic context retrieval.
@@ -52,6 +52,7 @@ The system includes a backend server, browser interface, developer CLI, and agen
 - Cloud synchronization, high availability, and horizontal scaling.
 - A built-in coding agent or code editor.
 - Multiple messaging adapters beyond Slack.
+- Slack app install/OAuth flow and LLM query-expansion/rerank (deterministic retrieval authoritative in v1).
 
 These items are outside the first implementation plan. The internal ports and adapter boundaries must allow later additions without shaping the first release around them.
 
@@ -145,12 +146,11 @@ The CLI and MCP server have no direct SQLite access. They remain thin clients wi
 By default, `gpd init` creates `.gpd/config.json` in the repository and configures the backend database at `.gpd/gpd.db`. The FastAPI process is the only database owner. Repository-relative paths are stored in domain records; absolute paths may be stored only in local configuration.
 
 SQLite is configured with:
-
-- WAL journal mode.
+- WAL journal mode (set once at startup, verified in health).
 - Foreign keys enabled on every connection.
 - A busy timeout for short write contention.
-- One application-level write queue for jobs and request mutations.
-- Short transactions with no network or LLM calls inside a transaction.
+- One application-level serialized write queue for jobs and request mutations; blocking DB work runs in `asyncio.to_thread`, never on the event loop.
+- Short transactions with no network, embedding, filesystem, or LLM calls inside a transaction.
 - Schema migrations applied explicitly on startup or through a management command.
 
 ### 6.2 Core records
@@ -165,8 +165,8 @@ SQLite is configured with:
 - `knowledge_items`: type, title, normalized content, status, confidence, valid time, created time.
 - `knowledge_evidence`: knowledge item, source span, support relationship.
 - `knowledge_chunks`: knowledge item or source, text, token estimate, metadata.
-- `tasks`: public identifier, type, title, description, status, priority, reporter, assignee, component, timestamps.
-- `bug_details`: task, reproduction steps, expected behavior, actual behavior, environment, severity, technical clues.
+- `tasks`: public identifier, type, title, description, status, priority, reporter, assignee, component, nullable acceptance criteria (null unless stated, never invented), timestamps.
+- `bug_details`: task, summary, reproduction steps, expected behavior, actual behavior, environment, severity, technical clues, participants.
 - `task_sources`, `task_knowledge`, and `task_files`: explicit task relationships.
 - `developer_sessions`: task, developer, repository, branch, agent, status, start/end/heartbeat timestamps.
 - `session_files`: session, relative path, change kind, observation time.
@@ -178,12 +178,13 @@ SQLite is configured with:
 - `jobs`: type, state, idempotency key, progress, attempts, error category, timestamps.
 - `llm_runs`: workflow, provider, model, prompt/schema version, source references, token counts, state, validation errors.
 - `audit_events`: actor, action, target, sanitized metadata, timestamp.
+- Auxiliary records (not domain API): `public_id_counters`, `idempotency_keys`, `job_attempts`, `session_commits`, `proposal_evidence`, FTS5 external-content tables with sync triggers, and `vec0` embedding tables.
 
 Credentials and API keys are excluded from the database. They are resolved from environment variables or the operating-system credential store.
 
 ### 6.3 Source and derived-data lifecycle
 
-Raw sources are immutable. A corrected source is a new version linked to the earlier source. Knowledge items, tasks, chunks, embeddings, and context packages are derived records whose generator version is retained. Re-ingestion replaces derived search rows transactionally without deleting audit history or task provenance.
+Raw sources are immutable. A corrected source is a new version linked to the earlier source. Knowledge items, tasks, chunks, embeddings, and context packages are derived records whose generator version is retained. Re-ingestion replaces derived search rows as DELETE+INSERT in one transaction (so FTS triggers fire) without deleting audit history or task provenance.
 
 ## 7. Search and Context Selection
 
@@ -237,7 +238,7 @@ Required bug identity fields are title and description. Other missing fields rem
 
 ### 8.3 Context query and reranking
 
-An LLM may expand the retrieval query and rerank a bounded candidate list. Deterministic direct relationships and hard filters remain in force. The LLM cannot remove mandatory task facts, source provenance, unresolved high-severity conflicts, or active file-overlap warnings.
+Deterministic hybrid scores (RRF + boosts/penalties) are authoritative in v1; LLM query-expansion/rerank is deferred. When later enabled, an LLM may expand the retrieval query and rerank a bounded candidate list, but deterministic direct relationships and hard filters remain in force. The LLM cannot remove mandatory task facts, source provenance, unresolved high-severity conflicts, or active file-overlap warnings.
 
 ### 8.4 Contradictory-knowledge detection
 
@@ -307,7 +308,7 @@ Input includes the task, prior context package, sanitized Git diff summary, chan
 - **Sessions:** developer/agent, task, branch, files, heartbeat, conflicts, and completion state.
 - **Conflicts:** evidence comparison, severity, resolution, dismissal, and audit history.
 - **Jobs:** progress, retryable failures, attempts, and cancellation.
-- **Settings:** project/repository settings, Slack configuration status, LLM and embedding model names, context budgets, retention, and health.
+- **Settings:** project/repository settings, Slack configuration status, LLM and embedding model names, context budgets, retention (display-only in v1), and health.
 
 The interface is responsive, keyboard accessible, and usable without vector search. It never hides source provenance behind generated summaries.
 
@@ -331,11 +332,11 @@ gpd knowledge review
 gpd doctor
 ```
 
-Every mutation command supports idempotent retries. Failures use stable error codes and nonzero exit status. JSON output uses a common envelope containing `ok`, `data`, `warnings`, and `error`.
+Every mutation command supports idempotent retries. Failures use stable error codes and nonzero exit status. JSON output uses a common envelope containing `ok`, `data`, `warnings`, and `error` on every command; bare `gpd context` defaults to text and bare `gpd finish` requires no summary per FRD §14.
 
 ### 10.3 MCP server
 
-The stdio MCP server exposes:
+The stdio MCP server exposes ten agent-safe tools (proposal confirmation stays human-only via CLI/dashboard and is NOT an MCP tool):
 
 - `gpd_project_get`
 - `gpd_task_list`
@@ -347,27 +348,26 @@ The stdio MCP server exposes:
 - `gpd_activity_report`
 - `gpd_session_finish`
 - `gpd_knowledge_proposal_list`
-- `gpd_knowledge_proposal_confirm`
 
 Tool schemas are narrow and versioned. Responses contain structured data plus concise text suitable for agent consumption. Tools return explicit warnings for degraded retrieval, conflicts, stale sessions, or incomplete task facts.
 
 ### 10.4 HTTP API
 
-All clients use `/api/v1`. Resources include projects, sources, ingestion jobs, conversations, tasks, sessions, context packages, conflicts, knowledge proposals, knowledge items, integrations, health, and audit events. Mutation endpoints accept idempotency keys. List endpoints use cursor pagination and stable filters. Error responses include a machine code, human message, retryability, and field details.
+All clients use `/api/v1`. Resources include projects, sources, ingestion jobs, conversations, tasks, sessions, context packages, conflicts, knowledge proposals, knowledge items, integrations, project settings, health, and audit events. Creation mutations accept `Idempotency-Key`; heartbeat and conflict-scan are safe-retry without keys; project settings PATCH uses optimistic version checks. `GET /health` is retained as a legacy alias alongside `/health/live` and `/health/ready`. List endpoints use cursor pagination and stable filters. Error responses include a machine code, human message, retryability, and field details.
 
 ## 11. Active Work and Conflict Detection
 
 ### 11.1 Active-work overlap
 
-Sessions are considered active while their heartbeat is fresh. Overlap scoring uses:
+Sessions are considered active while their heartbeat is fresh. Overlap scoring uses capped additive weights, `score = min(1.0, sum(weights))`:
 
-- exact relative-file matches;
-- shared directory or module;
-- shared task or related tasks;
-- shared component;
-- overlapping confirmed requirement or decision.
+- exact relative-file match 1.0;
+- shared directory or module 0.6;
+- shared component 0.5;
+- shared task or related tasks 0.4;
+- overlapping confirmed requirement or decision 0.2.
 
-Exact same-file changes generate the strongest warning. Related-module warnings are advisory and display their evidence. GPD recommends coordination but does not block work.
+Severity is high at >=1.0, medium at >=0.6, low at >=0.4, with component scores retained as evidence. Exact same-file changes generate the strongest warning. Related-module warnings are advisory and display their evidence. GPD recommends coordination but does not block work.
 
 ### 11.2 Knowledge contradictions
 

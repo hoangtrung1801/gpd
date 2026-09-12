@@ -13,16 +13,16 @@
 ## Global Constraints
 
 - Python 3.12 or newer; Node.js 24 or newer.
-- SQLite is the only database. Enable WAL, foreign keys, busy timeout, FTS5, and integrity checks.
+- SQLite is the only database. Enable WAL (set once at startup, verified in health), foreign keys, busy timeout, FTS5, and integrity checks. All blocking DB work runs in `asyncio.to_thread`; never block the event loop. All writes go through a single serialized `Database.write()` queue with short transactions; no LLM, embedding, network, or filesystem calls inside a transaction.
 - FastAPI is the sole SQLite owner; browser, CLI, MCP, and Slack clients never open gpd.db.
 - Default database path is .gpd/gpd.db and repository configuration path is .gpd/config.json.
 - Credentials stay in environment variables or the operating-system credential store, never SQLite or logs.
 - Every generated fact retains source evidence and confidence; missing facts remain empty.
 - Raw sources are immutable; derived records retain generator/schema versions.
-- Durable knowledge changes require explicit human confirmation.
-- Vector search degrades to FTS5 and direct relationships when sqlite-vec or embeddings are unavailable.
-- All public HTTP APIs live below /api/v1 and mutations accept idempotency keys.
-- CLI machine output uses the stable envelope {ok, data, warnings, error}.
+- Durable knowledge changes require explicit human confirmation. MCP exposes `gpd_knowledge_proposal_list` only; confirm/edit/reject are human-only via CLI/dashboard with `actor` + reason. The MCP server MUST NOT call confirm endpoints.
+- Vector search degrades to FTS5 and direct relationships when sqlite-vec or embeddings are unavailable. Deterministic hybrid scores are authoritative in v1; LLM query-expansion/rerank is explicitly deferred (see Task 4/8).
+- All public HTTP APIs live below /api/v1. Creation mutations (projects, sources, bugs, sessions-start, proposals decisions, conflict resolve) accept `Idempotency-Key`; heartbeat updates and conflict-scan are safe-retry without keys; project settings PATCH uses optimistic version checks instead of keys.
+- CLI machine output uses the stable envelope {ok, data, warnings, error} on every command, including `task list/show`, `context`, and `doctor`. Bare `gpd context` (text) and bare `gpd finish` (no summary) MUST work per FRD §14.
 - Normal CI is deterministic and credential-free; live Slack and LLM checks are opt-in.
 
 ---
@@ -97,8 +97,9 @@ Each capability directory contains schemas.py, repository.py, service.py, and ro
 - Create: .env.example
 - Create: README.md
 - Create: pyproject.toml
-- Create: uv.lock
+- Generate (do not hand-write): uv.lock via `uv sync`
 - Create: package.json
+- Generate (do not hand-write): pnpm-lock.yaml via `pnpm install`
 - Create: pnpm-workspace.yaml
 - Create: tsconfig.base.json
 - Create: backend/src/gpd/__init__.py
@@ -114,15 +115,17 @@ Each capability directory contains schemas.py, repository.py, service.py, and ro
 
 - [ ] **Step 1: Initialize Git and workspace metadata**
 
+Skip `git init` when `.git` already exists; never re-init an existing repo.
+
 Run:
 
 ~~~bash
-git init
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init
 git branch -M main
 mkdir -p backend/src/gpd backend/tests apps packages fixtures tests/e2e
 ~~~
 
-Write .gitignore with Python caches, virtual environments, node_modules, build output, .env, and .gpd/*.db plus SQLite WAL/SHM companions. Keep .gpd/config.json trackable because its schema contains only API URL and opaque project/repository/task identifiers.
+Write .gitignore with Python caches, virtual environments, node_modules, build output, .env, and .gpd/*.db plus SQLite WAL/SHM companions. Keep .gpd/config.json trackable because its schema contains only API URL and opaque project/repository/task identifiers. `GET /health` is the stable legacy alias; Task 15 adds `/health/live` + `/health/ready` without removing it.
 
 - [ ] **Step 2: Write the failing health test**
 
@@ -227,6 +230,7 @@ git commit -m "chore: initialize GPD monorepo"
 - Create: backend/src/gpd/db/engine.py
 - Create: backend/src/gpd/db/models.py
 - Create: backend/src/gpd/db/migrations.py
+- Create: backend/src/gpd/audit/service.py
 - Create: backend/src/gpd/projects/schemas.py
 - Create: backend/src/gpd/projects/repository.py
 - Create: backend/src/gpd/projects/service.py
@@ -238,7 +242,8 @@ git commit -m "chore: initialize GPD monorepo"
 - Test: backend/tests/projects/test_projects_api.py
 
 **Interfaces:**
-- Produces: Database.open(path: Path) -> Database
+- Produces: Database.open(path: Path) -> Database with serialized `Database.write()` queue, `connect()` for reads
+- Produces: `audit.append(actor, action, target, metadata)` minimal helper (redaction hardening lands in Task 15)
 - Produces: ProjectService.register(ProjectCreate, idempotency_key: str) -> Project
 - Produces: POST /api/v1/projects and GET /api/v1/projects/{project_id}
 - Produces: Project {id: UUID, name: str, team_identifier: str | None, created_at: datetime}
@@ -271,14 +276,15 @@ Expected: failures show missing Database and /api/v1/projects.
 
 - [ ] **Step 3: Create the first migration and database owner**
 
-The migration creates projects, repositories, idempotency_keys, and audit_events with UUID text primary keys, UTC timestamp text columns, foreign keys, unique project names, and unique repository roots.
+The migration creates projects, repositories, idempotency_keys, and audit_events with UUID text primary keys, UTC timestamp text columns, foreign keys, unique project names, and unique repository roots. Create the minimal `audit.append()` helper here so Tasks 5/7/11/12 write audit rows in the same transaction; Task 15 only adds redaction/query hardening.
 
 ~~~python
 # backend/src/gpd/db/engine.py
+import asyncio
 class Database:
     def __init__(self, engine: Engine):
         self.engine = engine
-
+        self._write_lock = asyncio.Lock()
     @classmethod
     def open(cls, path: Path) -> "Database":
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,20 +292,24 @@ class Database:
             "sqlite+pysqlite:///" + str(path),
             connect_args={"check_same_thread": False, "timeout": 5},
         )
-
         @event.listens_for(engine, "connect")
         def configure_sqlite(dbapi_connection, _record) -> None:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
-
-        return cls(engine)
-
+        db = cls(engine)
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        return db
     def connect(self):
         return self.engine.connect()
+    async def write(self, fn, *args, **kwargs):
+        async with self._write_lock:
+            return await asyncio.to_thread(fn, *args, **kwargs)
 ~~~
+
+Set WAL once at startup (not on every connection). Run all blocking SQLAlchemy calls via `asyncio.to_thread` or `Database.write()`. Keep transactions short with no LLM/embedding/network calls inside. Job lease claim MUST be one atomic statement (`UPDATE ... WHERE state='queued' OR lease_expires_at < now RETURNING`) with startup requeue of expired leases before the worker loop.
 
 Run Alembic upgrades from an explicit management function before accepting requests. Do not auto-create tables through SQLAlchemy metadata.
 
@@ -325,7 +335,7 @@ Use an idempotency_keys row keyed by endpoint plus Idempotency-Key. Return the o
 
 - [ ] **Step 5: Wire lifespan migrations and project routes**
 
-Update create_app so lifespan opens Database, applies migrations, constructs ProjectService, and closes the engine. Health now returns database: "ok" after SELECT 1 and database: "error" with HTTP 503 when unavailable.
+Update create_app so lifespan opens Database, applies migrations, constructs ProjectService, and closes the engine. Keep `GET /health` shape unchanged; it returns database: "ok" after SELECT 1 and database: "error" with HTTP 503 when unavailable. Task 15 adds `/health/live` + `/health/ready` alongside it.
 
 - [ ] **Step 6: Verify migration and API behavior**
 
@@ -370,8 +380,8 @@ git commit -m "feat: add SQLite project registry"
 - Consumes: Database, Project
 - Produces: Source {id, project_id, type, title, canonical_ref, author, captured_at, content_hash, raw_content, state}
 - Produces: SourceSpan {id, source_id, locator, content, checksum}
-- Produces: JobRunner.register(job_type: str, handler: JobHandler) -> None
-- Produces: POST /api/v1/projects/{project_id}/sources, GET /sources/{source_id}, GET /jobs/{job_id}
+- Produces: JobRunner.register(job_type: str, handler: JobHandler) -> None with all blocking DB work in `asyncio.to_thread` via `Database.write()`
+- Produces: POST /api/v1/projects/{project_id}/sources (accepts `Idempotency-Key` alongside content-hash dedup), GET /sources/{source_id}, GET /jobs/{job_id}
 
 - [ ] **Step 1: Write failing immutable-source and lease-recovery tests**
 
@@ -443,7 +453,7 @@ class JobRunner:
     async def run_forever(self, worker_id: str, stop: asyncio.Event) -> None: ...
 ~~~
 
-Persist the job before returning HTTP 202. Claim with a transaction, renew leases during long work, use bounded exponential backoff for retryable errors, and return expired leases to queued state at startup.
+Persist the job via `Database.write()` before returning HTTP 202. Claim with one atomic statement, renew leases during long work, use bounded exponential backoff for retryable errors, and return expired leases to queued state at startup. Generate embeddings/parse chunks outside any write transaction; only the final index-row insert holds the write lock.
 
 - [ ] **Step 6: Verify ingestion, job recovery, and error states**
 
@@ -455,7 +465,7 @@ uv run alembic -c backend/alembic.ini upgrade head
 uv run ruff check backend
 ~~~
 
-Expected: deduplication, immutable content, chunk locators, progress, retry, lease recovery, cancellation, and size/encoding tests pass.
+Expected: idempotency-key replay, deduplication, immutable content, chunk locators, progress, retry, lease recovery, cancellation, and size/encoding tests pass.
 
 - [ ] **Step 7: Commit ingestion and jobs**
 
@@ -509,6 +519,13 @@ def test_fts_fallback_returns_warning_when_vectors_unavailable(search_without_ve
     result = search_without_vec.search(SearchQuery(project_id="p1", text="payment invalid"))
     assert result.hits
     assert result.warnings == ["vector_search_unavailable"]
+
+
+def test_direct_relationships_survive_without_any_search(search_without_any_index):
+    result = search_without_any_index.search(SearchQuery(project_id="p1", text="payment", task_id="task-1"))
+    assert result.hits
+    assert result.warnings == ["lexical_search_unavailable", "vector_search_unavailable"]
+
 ~~~
 
 - [ ] **Step 2: Run focused search tests**
@@ -519,7 +536,7 @@ Expected: missing search interfaces and indexes.
 
 - [ ] **Step 3: Create lexical and vector indexes**
 
-The migration creates an FTS5 external-content table keyed to knowledge_chunks, synchronization triggers for insert/update/delete, and a vec0 virtual table with one float embedding column at the configured dimension. Loading sqlite-vec is attempted per database connection; failure marks vector health unavailable without blocking migration or FTS5.
+The migration creates an FTS5 external-content table keyed to knowledge_chunks carrying `project_id` for scoped search, standard three-trigger sync (insert/delete using `old.rowid`, delete+insert on update — never bare UPDATE of an indexed column), and a vec0 virtual table with one float embedding column at the configured dimension. Re-ingestion replaces derived rows as DELETE+INSERT in one transaction so triggers fire. Load sqlite-vec once at startup and share it; per-connection failure marks vector health unavailable without blocking migration or FTS5. Record a dimension-change reindex runbook: changing model/dimension enqueues re-embedding via stored provider/model/dimension/content-hash.
 
 - [ ] **Step 4: Implement embedding and search adapters**
 
@@ -537,7 +554,7 @@ class SearchIndex(Protocol):
     def health(self) -> SearchHealth: ...
 ~~~
 
-Reject non-finite vectors and dimension mismatches. Store embedding provider, model, dimension, and content hash so model changes can enqueue re-embedding.
+Reject non-finite vectors and dimension mismatches. Store embedding provider, model, dimension, and content hash so model changes can enqueue re-embedding. Run embedding network calls outside write transactions; only row inserts use `Database.write()`. v1 LLM query-expansion/rerank is deferred: deterministic RRF + boosts below are authoritative and no LLM may drop mandatory direct relationships.
 
 - [ ] **Step 5: Implement reciprocal-rank fusion and domain boosts**
 
@@ -557,6 +574,11 @@ BOOSTS = {
     "confirmed_knowledge": 0.15,
     "source_conversation": 0.10,
 }
+PENALTIES = {
+    "unconfirmed_knowledge": -0.10,
+    "superseded_knowledge": -1.00,
+    "stale_source": -0.05,
+}
 ~~~
 
 Return component scores and human-readable selection reasons with every hit. Never let an LLM override mandatory direct relationships or unresolved high-severity warnings.
@@ -572,7 +594,7 @@ uv run ruff check backend
 uv run mypy backend/src
 ~~~
 
-Expected: FTS ranking, vector ranking, fusion, filters, boosts, dimension validation, pending embeddings, and FTS-only fallback pass.
+Expected: FTS ranking, project-scoped lexical filtering, vector ranking, fusion, filters, boosts and penalties, dimension validation, pending embeddings, FTS-only fallback, and direct-relationship minimal package pass.
 
 - [ ] **Step 7: Commit hybrid retrieval**
 
@@ -590,6 +612,7 @@ git commit -m "feat: add SQLite hybrid context search"
 - Create: backend/src/gpd/conversations/schemas.py
 - Create: backend/src/gpd/conversations/repository.py
 - Create: backend/src/gpd/conversations/service.py
+- Create: backend/src/gpd/conversations/router.py
 - Create: backend/src/gpd/tasks/schemas.py
 - Create: backend/src/gpd/tasks/repository.py
 - Create: backend/src/gpd/tasks/service.py
@@ -640,7 +663,7 @@ Expected: missing task and workflow modules.
 
 - [ ] **Step 3: Migrate normalized conversations and tasks**
 
-Create conversations, conversation_messages, tasks, bug_details, task_sources, task_knowledge, task_files, llm_runs, and public_id_counters. Enforce ordered unique external message IDs per conversation, one bug_details row per bug task, and source/evidence foreign keys.
+Create conversations, conversation_messages, tasks (including nullable `acceptance_criteria` per FR-09), bug_details, task_sources, task_knowledge, task_files, llm_runs, and public_id_counters. Enforce ordered unique external message IDs per conversation, one bug_details row per bug task, and source/evidence foreign keys. `POST /api/v1/conversations/{id}/bugs` is served by the conversations router delegating to `TaskService`.
 
 - [ ] **Step 4: Implement versioned structured LLM workflow**
 
@@ -657,6 +680,7 @@ class ExtractedField(BaseModel, Generic[T]):
 
 class BugExtraction(BaseModel):
     title: ExtractedField[str]
+    summary: ExtractedField[str]
     description: ExtractedField[str]
     reproduction_steps: ExtractedField[list[str]]
     actual_behavior: ExtractedField[str]
@@ -665,9 +689,10 @@ class BugExtraction(BaseModel):
     severity: ExtractedField[Literal["low", "medium", "high", "critical"]]
     affected_component: ExtractedField[str]
     technical_clues: ExtractedField[list[str]]
+    participants: list[str] = Field(default_factory=list)
 ~~~
 
-The workflow requires nonempty title and description, validates every evidence message ID against the input thread, and performs one corrective retry after schema failure. Store workflow name, prompt version, schema version, model, token counts, source IDs, state, and sanitized validation error.
+The workflow requires nonempty title and description, validates every evidence message ID against the input thread, and performs one corrective retry after schema failure. Store workflow name, prompt version, schema version, model, token counts, source IDs, state, and sanitized validation error. Run LLM extraction outside any DB transaction; only the final insert runs in `Database.write()`.
 
 - [ ] **Step 5: Implement atomic bug creation**
 
@@ -688,7 +713,7 @@ class TaskService:
         )
 ~~~
 
-Allocate the next public BUG-N identifier in the same write transaction as task, bug details, task-source link, field evidence, and audit event.
+Allocate the next public BUG-N identifier in the same write transaction as task, bug details, task-source link, field evidence, and audit event (via Task 2 `audit.append`). Map `severity` → `tasks.priority` default, seed `tasks.component` + `task_files` from `affected_component`/clues when file-like paths are present, and leave `acceptance_criteria` null unless the thread states it — never invent it.
 
 - [ ] **Step 6: Verify task behavior and provider-free recordings**
 
@@ -730,6 +755,7 @@ git commit -m "feat: extract evidence-backed bugs"
 - Consumes: TaskService.create_bug_from_conversation
 - Produces: SlackClient.fetch_thread(channel_id, thread_ts) -> SlackThread
 - Produces: POST /api/v1/integrations/slack/events
+- Produces: GET /api/v1/integrations/slack/status (install/configured flag, never secrets)
 - Produces: Slack invocation parser supporting “create a bug” and “create a bug task”
 
 - [ ] **Step 1: Write failing signature, replay, and deduplication tests**
@@ -780,11 +806,11 @@ def verify_slack_signature(
         raise SlackSignatureInvalid()
 ~~~
 
-Do not log the raw signed body. Handle Slack URL verification synchronously; persist all other accepted events with external event ID as the idempotency key and acknowledge within three seconds.
+Do not log the raw signed body. Handle Slack URL verification synchronously; persist all other accepted events via `Database.write()` with external event ID as the idempotency key and acknowledge within three seconds (offload thread-fetch + LLM work to jobs so the webhook never blocks on network). v1 covers webhook ingestion only; full Slack app install/OAuth flow is deferred — `/status` reports configured-vs-missing credentials.
 
 - [ ] **Step 4: Implement thread normalization and invocation handling**
 
-Normalize bot/user identities, timestamps, links, and message order into ConversationMessage. Ignore bot retries and messages without a supported GPD mention. Fetch the parent plus all replies, store the immutable source, create the normalized conversation, enqueue bug extraction, then post a success or reviewable failure message.
+Normalize bot/user identities, timestamps, links, and message order into ConversationMessage. Ignore bot retries and messages without a supported GPD mention. Fetch the parent plus all replies, store the immutable source, create the normalized conversation, enqueue bug extraction, then post a success or reviewable failure message. Match invocation case-insensitively on normalized text containing a GPD mention plus one supported phrase; everything else is ignored (no bug).
 
 ~~~python
 SUPPORTED_BUG_PHRASES = (
@@ -836,9 +862,9 @@ git commit -m "feat: create bugs from Slack threads"
 
 **Interfaces:**
 - Consumes: Repository, Task
-- Produces: GitSnapshot {root, branch, changed_files, recent_commits, remote_url}
-- Produces: SessionService.start(StartSession) -> DeveloperSession
-- Produces: POST /api/v1/sessions, POST /sessions/{id}/heartbeat, GET /sessions
+- Produces: GitSnapshot {root (transient only, never stored), branch, changed_files (repository-relative), recent_commits, remote_url}
+- Produces: SessionService.start(StartSession, idempotency_key: str) -> DeveloperSession
+- Produces: POST /api/v1/sessions (accepts `Idempotency-Key`), POST /api/v1/sessions/{id}/heartbeat (safe-retry, no key), GET /api/v1/sessions
 - Produces: Conflict type work_overlap with severity, explanation, and evidence
 - Produces: OverlapWarning {severity, explanation, suggested_action, evidence}
 
@@ -892,9 +918,9 @@ Execute with subprocess argument arrays, shell=False, a five-second timeout, san
 
 - [ ] **Step 5: Implement sessions and overlap warnings**
 
-On session start, validate project, task, and registered repository; capture a Git snapshot; persist changed files; compare with fresh active sessions; and return warnings. Heartbeats replace the session’s current file observation set and update last_seen_at.
+On session start, validate project, task, and registered repository via `Database.write()`; capture a Git snapshot; persist only repository-relative changed files (absolute root stays in local config, never in domain rows); compare with fresh active sessions; and return warnings. Heartbeats replace the session's current file observation set and update last_seen_at.
 
-Overlap weights are exact file 1.0, same module 0.6, same component 0.5, same or explicitly related task 0.4, and shared confirmed knowledge 0.2. Severity is high at 1.0, medium at 0.6, and low at 0.4. Store the component scores. Return suggested_action with a concrete coordination recommendation: avoid an exact overlapping file until the named session completes, coordinate before editing the shared module, or continue when overlap is informational.
+Overlap weights are exact file 1.0, same module 0.6, same component 0.5, same or explicitly related task 0.4, and shared confirmed knowledge 0.2. Score is `min(1.0, sum(weights))`. Severity is high at >=1.0, medium at >=0.6, low at >=0.4. Store the component scores. Return suggested_action with a concrete coordination recommendation: avoid an exact overlapping file until the named session completes, coordinate before editing the shared module, or continue when overlap is informational.
 
 - [ ] **Step 6: Verify session lifecycle**
 
@@ -948,8 +974,16 @@ def test_context_keeps_task_facts_and_high_conflicts_under_budget(assembler):
     )
     sections = [entry.section for entry in package.entries]
     assert sections[:2] == ["task", "expected_actual"]
-    assert "high_severity_conflicts" in sections
+    if assembler.has_high_severity_conflicts("s1"):
+        assert "high_severity_conflicts" in sections
     assert package.estimated_tokens <= 900
+
+
+def test_mandatory_overflow_compacts_but_keeps_title_and_warnings(assembler):
+    package = assembler.assemble(ContextRequest(session_id="s1", token_budget=50))
+    assert "budget_exceeded_by_mandatory" in package.warnings
+    assert package.estimated_tokens <= 50
+    assert package.keeps_title_actual_expected_and_high_warnings()
 
 
 def test_text_and_json_renderers_share_entry_order(context_package):
@@ -975,8 +1009,8 @@ Create context_packages and context_entries. Store session, task, developer quer
 MANDATORY_SECTIONS = (
     "task",
     "expected_actual",
-    "high_severity_conflicts",
 )
+CONDITIONAL_MANDATORY = ("high_severity_conflicts",)  # included only when conflicts exist
 
 
 class TokenBudget:
@@ -985,17 +1019,21 @@ class TokenBudget:
         mandatory: Sequence[CandidateEntry],
         optional: Sequence[CandidateEntry],
         limit: int,
-    ) -> list[CandidateEntry]:
+    ) -> tuple[list[CandidateEntry], list[str]]:
         selected = list(mandatory)
         remaining = limit - sum(item.token_estimate for item in selected)
+        if remaining < 0:
+            compacted = compact_mandatory(selected, limit)
+            return compacted, ["budget_exceeded_by_mandatory"]
+        warnings: list[str] = []
         for item in diversify(optional):
             if item.token_estimate <= remaining:
                 selected.append(item)
                 remaining -= item.token_estimate
-        return selected
+        return selected, warnings
 ~~~
 
-If mandatory facts exceed the requested budget, compact their presentation without dropping title, actual behavior, expected behavior, or high-severity warnings; record budget_exceeded_by_mandatory warning.
+If mandatory facts exceed the requested budget, compact their presentation (shorten discussion/background first, then truncate optional prose) without dropping title, actual behavior, expected behavior, or high-severity warnings; record budget_exceeded_by_mandatory warning.
 
 - [ ] **Step 5: Implement assembly and renderers**
 
@@ -1011,7 +1049,7 @@ uv run ruff check backend
 uv run mypy backend/src
 ~~~
 
-Expected: deterministic ordering, diversity, budget enforcement, provenance, immutable snapshots, conflict inclusion, empty optional results, and vector-unavailable warnings pass.
+Expected: deterministic ordering, diversity, budget enforcement, mandatory-overflow compaction, provenance, immutable snapshots, conflict inclusion, empty optional results, both-indexes-down minimal package, and vector-unavailable warnings pass.
 
 - [ ] **Step 7: Commit context assembly**
 
@@ -1064,15 +1102,18 @@ it("finds .gpd/config.json from a nested directory", async () => {
   expect(config.value.projectId).toBe("project-1");
 });
 
-it("prints the stable JSON envelope", async () => {
-  const result = await runCli(["status", "--json"], fakeRuntime());
-  expect(JSON.parse(result.stdout)).toEqual({
-    ok: true,
-    data: expect.objectContaining({ session: null }),
-    warnings: [],
-    error: null,
-  });
-});
+it.each([["status"], ["task", "show", "BUG-1"], ["context"], ["doctor"]])(
+  "prints the stable JSON envelope for %s --json",
+  async (args) => {
+    const result = await runCli([...args, "--json"], fakeRuntime());
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      data: expect.anything(),
+      warnings: expect.anyArray(),
+      error: null,
+    });
+  }
+);
 ~~~
 
 - [ ] **Step 2: Run TypeScript tests**
@@ -1103,7 +1144,7 @@ ApiClient applies a request timeout, sends an Idempotency-Key for mutations, par
 
 - [ ] **Step 4: Implement server, project, ingestion, task, and session commands**
 
-Use Commander command modules with injected filesystem, process, clock, and ApiClient dependencies. gpd server start launches uv run uvicorn gpd.app:app with an argument array, supports foreground and --detach, and polls /health/ready with a bounded timeout. gpd init detects the Git root, remote, and default branch; registers through the API; and atomically writes .gpd/config.json. gpd add reads only the explicit path, verifies it is within the Git root, caps input at 2 MiB, and sends source content. gpd task list/show render backend pagination/detail, gpd task set validates the task then atomically updates currentTaskId, gpd start sends Git metadata and creates the session, and gpd status shows the selected task plus session and search health.
+Use Commander command modules with injected filesystem, process, clock, and ApiClient dependencies. Every command honors `--json` with the stable envelope. gpd server start launches uv run uvicorn gpd.app:app with an argument array (PYTHONPATH includes backend/src), supports foreground and --detach, and polls /health/ready with a bounded timeout. gpd init detects the Git root, remote, and default branch; registers through the API; and atomically writes .gpd/config.json. gpd add reads only the explicit path, verifies it is within the Git root, caps input at 2 MiB, and sends source content. gpd task list/show render backend pagination/detail, gpd task set validates the task then atomically updates currentTaskId, gpd start sends Git metadata with an Idempotency-Key and creates the session, and gpd status shows the selected task plus session and search health.
 
 - [ ] **Step 5: Implement context, finish, knowledge review, and doctor**
 
@@ -1112,8 +1153,12 @@ gpd context defaults to text and supports --format json. gpd finish sends change
 - [ ] **Step 6: Implement safe external-agent launching**
 
 ~~~typescript
+export type AgentAdapter =
+  | { kind: "args"; flag: string }
+  | { kind: "stdin" };
 export async function launchAgent(input: {
   command: string[];
+  adapter: AgentAdapter;
   contextText: string;
   prompt: string;
   spawn: typeof nodeSpawn;
@@ -1121,17 +1166,15 @@ export async function launchAgent(input: {
   const directory = await mkdtemp(join(tmpdir(), "gpd-context-"));
   const contextPath = join(directory, "context.md");
   await writeFile(contextPath, input.contextText, { mode: 0o600 });
-  const child = input.spawn(input.command[0], [
-    ...input.command.slice(1),
-    "--gpd-context",
-    contextPath,
-    input.prompt,
-  ], { shell: false, stdio: "inherit" });
+  const child =
+    input.adapter.kind === "stdin"
+      ? input.spawn(input.command[0], [...input.command.slice(1), input.prompt], { shell: false, stdio: ["pipe", "inherit", "inherit"] })
+      : input.spawn(input.command[0], [...input.command.slice(1), input.adapter.flag, contextPath, input.prompt], { shell: false, stdio: "inherit" });
   return await waitForExitAndRemove(directory, child);
 }
 ~~~
 
-Agent adapters define their supported context argument or stdin contract in configuration. Never concatenate a shell command. Remove temporary files after exit and on SIGINT/SIGTERM.
+Agent adapters define their supported context argument (`flag`) or stdin contract in configuration; never hardcode `--gpd-context` and never concatenate a shell command. Remove temporary files after exit and on SIGINT/SIGTERM.
 
 The gpd agent command starts a session when none is active, fetches and stores the canonical context package, launches the configured adapter, sends bounded heartbeats while the child runs, preserves the child exit code, and leaves knowledge extraction to the explicit gpd finish command.
 
@@ -1147,7 +1190,7 @@ pnpm --filter @gpd/cli typecheck
 pnpm --filter @gpd/cli lint
 ~~~
 
-Expected: nested config discovery, atomic writes, path safety, every command, JSON output, error exits, request timeout, agent argument safety, temporary-file permissions, and cleanup tests pass.
+Expected: nested config discovery, atomic writes, path safety, every command JSON envelope, bare `gpd context`/`gpd finish` defaults, error exits, request timeout, adapter arg/stdin safety, temporary-file permissions, and cleanup tests pass.
 
 - [ ] **Step 8: Commit the CLI**
 
@@ -1175,7 +1218,7 @@ git commit -m "feat: add the GPD developer CLI"
 
 **Interfaces:**
 - Consumes: @gpd/api-client, @gpd/config, @gpd/contracts
-- Produces: stdio MCP server with the eleven approved gpd_* tools
+- Produces: stdio MCP server with ten agent-safe tools (confirm stays human-only via CLI/dashboard)
 - Produces: structuredContent plus concise text and warning annotations
 
 - [ ] **Step 1: Write failing tool registration and mapping tests**
@@ -1194,8 +1237,12 @@ it("registers the stable GPD tool names", async () => {
     "gpd_activity_report",
     "gpd_session_finish",
     "gpd_knowledge_proposal_list",
-    "gpd_knowledge_proposal_confirm",
   ]);
+});
+
+it("does not expose proposal confirm to agents", async () => {
+  const server = createGpdMcpServer(fakeApiClient());
+  expect(server.registeredToolNames()).not.toContain("gpd_knowledge_proposal_confirm");
 });
 
 it("returns retrieval warnings to the agent", async () => {
@@ -1220,7 +1267,7 @@ gpd_project_get returns the project and search/integration health. gpd_task_list
 
 - [ ] **Step 5: Implement mutation tools**
 
-gpd_task_select validates and writes currentTaskId atomically. gpd_session_start and gpd_session_finish send idempotency keys. gpd_activity_report updates heartbeat and relative changed files. gpd_knowledge_proposal_confirm requires proposal ID and optional edited title/content, and returns the confirmed knowledge item.
+gpd_task_select validates and writes currentTaskId atomically. gpd_session_start and gpd_session_finish send idempotency keys. gpd_activity_report updates heartbeat and relative changed files. Proposal confirm/edit/reject are NOT MCP tools: agents surface `gpd_knowledge_proposal_list` evidence and ask a human to run `gpd knowledge review confirm|edit|reject` in CLI/dashboard.
 
 - [ ] **Step 6: Verify MCP protocol behavior**
 
@@ -1258,7 +1305,7 @@ git commit -m "feat: expose GPD context over MCP"
 **Interfaces:**
 - Consumes: confirmed knowledge, source evidence, LlmGateway
 - Produces: ContradictionResult {classification, confidence, explanation, evidence_ids}
-- Produces: POST /api/v1/conflicts/scan, GET /conflicts, POST /conflicts/{id}/resolve
+- Produces: POST /api/v1/conflicts/scan (safe-retry, no key), GET /api/v1/conflicts, POST /api/v1/conflicts/{id}/resolve (accepts `Idempotency-Key`)
 - Produces: resolution actions supersede, clarify_scope, accept_conditional, dismiss
 
 - [ ] **Step 1: Write failing contradiction and resolution tests**
@@ -1304,7 +1351,7 @@ Validate returned evidence against the candidate pair. Create a conflict only fo
 
 - [ ] **Step 5: Implement explicit conflict resolution**
 
-Require actor and resolution note. supersede marks the losing knowledge item superseded; clarify_scope and accept_conditional create a confirmed clarifying item linked to both claims; dismiss retains the detector result but excludes the pair from repeated scans. Append an audit event in the same transaction.
+Require actor and resolution note; resolve accepts `Idempotency-Key` and is safe to retry. supersede marks the losing knowledge item superseded; clarify_scope and accept_conditional create a confirmed clarifying item linked to both claims; dismiss retains the detector result but excludes the pair from repeated scans. Append an audit event in the same transaction.
 
 - [ ] **Step 6: Verify detection and resolution**
 
@@ -1572,7 +1619,7 @@ Sessions show developer/agent, task, repository, branch, changed files, freshnes
 
 - [ ] **Step 5: Implement jobs and settings pages**
 
-Add the project settings endpoints with optimistic version checks and an allowlist of editable non-secret fields. The response exposes slack_credential_configured and llm_credential_configured booleans, never secret values. Jobs show progress, attempts, error code, retryability, retry, and queued-job cancellation. Settings edit non-secret project/repository values, display whether Slack and LLM credentials are configured, set model names and context budget, and show database/FTS/vector health.
+Add the project settings endpoints with optimistic version checks (the idempotency mechanism for settings) and an allowlist of editable non-secret fields: `name`, `team_identifier`, `default_branch`, `llm_model`, `embedding_model`, `context_token_budget`. Retention is display-only in v1 (no destructive purge behavior). The response exposes slack_credential_configured and llm_credential_configured booleans, never secret values. Jobs show progress, attempts, error code, retryability, retry, and queued-job cancellation. Settings edit non-secret project/repository values, display whether Slack and LLM credentials are configured, set model names and context budget, and show database/FTS/vector health.
 
 - [ ] **Step 6: Verify all dashboard states**
 
@@ -1601,7 +1648,7 @@ git commit -m "feat: complete GPD operations dashboard"
 **Files:**
 - Create: backend/src/gpd/security/redaction.py
 - Create: backend/src/gpd/security/auth.py
-- Create: backend/src/gpd/audit/service.py
+- Modify: backend/src/gpd/audit/service.py (harden Task 2 helper with redaction/query; do not re-create)
 - Create: backend/src/gpd/db/backup.py
 - Create: backend/src/gpd/api/routers/health.py
 - Create: backend/src/gpd/api/routers/admin.py
@@ -1619,8 +1666,8 @@ git commit -m "feat: complete GPD operations dashboard"
 **Interfaces:**
 - Produces: Redactor.redact(text: str) -> RedactionResult
 - Produces: POST /api/v1/admin/backup -> backup path and checksum
-- Produces: GET /health/live and GET /health/ready
-- Produces: explicit bearer token requirement when binding outside loopback
+- Produces: GET /health/live and GET /health/ready alongside legacy GET /health
+- Produces: explicit bearer token requirement when binding outside loopback (protects /api/v1 and /health/ready; /health/live stays minimal)
 
 - [ ] **Step 1: Write failing security and backup tests**
 
@@ -1651,11 +1698,11 @@ Expected: redactor, binding validation, backup service, and split health routes 
 
 - [ ] **Step 3: Implement redaction and local access control**
 
-Redact configured regexes plus OpenAI-style keys, Slack tokens, GitHub tokens, PEM private-key blocks, Authorization headers, and dotenv secret assignments before LLM calls and audit/error persistence. If api_host is not loopback, startup requires GPD_ACCESS_TOKEN; protect /api/v1 with constant-time bearer-token comparison while leaving liveness free of internal detail.
+Redact configured regexes plus OpenAI-style keys, Slack tokens, GitHub tokens, PEM private-key blocks, Authorization headers, and dotenv secret assignments before LLM calls and audit/error persistence. If api_host is not loopback, startup requires GPD_ACCESS_TOKEN; protect /api/v1 and /health/ready with constant-time bearer-token comparison while leaving /health/live free of internal detail.
 
 - [ ] **Step 4: Implement health, integrity, and online backup**
 
-Liveness reports only process state. Readiness checks migration head, SELECT 1, PRAGMA integrity_check, FTS5 query, vector extension health, job worker lease, and configured integrations; optional/degraded checks become warnings, while database or migration failure returns 503. Backup uses sqlite3.Connection.backup into an explicit .gpd/backups path, runs integrity_check on the result, and returns SHA-256.
+Liveness reports only process state. Readiness checks migration head, SELECT 1, PRAGMA integrity_check, FTS5 query, vector extension health, job worker lease, and configured integrations; optional/degraded checks become warnings, while database or migration failure returns 503. Keep legacy GET /health as an alias of readiness summary. Backup uses sqlite3.Connection.backup into an explicit .gpd/backups path, runs integrity_check on the result, and returns SHA-256.
 
 - [ ] **Step 5: Add reproducible local deployment**
 
@@ -1690,6 +1737,7 @@ git commit -m "feat: harden local GPD deployment"
 
 **Files:**
 - Create: fixtures/demo-project/docs/checkout-prd.md
+- Create: fixtures/demo-project/docs/checkout-frd.md
 - Create: fixtures/demo-project/docs/payment-adr.md
 - Create: fixtures/demo-project/src/payment/payment-service.ts
 - Create: fixtures/demo-project/src/checkout/payment-errors.ts
@@ -1714,9 +1762,13 @@ git commit -m "feat: harden local GPD deployment"
 def test_complete_project_memory_loop(demo):
     project = demo.gpd_init()
     demo.add("docs/checkout-prd.md")
+    demo.add("docs/checkout-frd.md")
     demo.add("docs/payment-adr.md")
     task = demo.post_signed_slack_fixture("checkout_bug_thread.json")
     assert task["public_id"] == "BUG-1"
+    assert task["acceptance_criteria"] is None
+    assert task["summary"]
+    assert task["participants"]
 
     demo.cli("task set BUG-1")
     session = demo.cli("start").json()
@@ -1728,7 +1780,7 @@ def test_complete_project_memory_loop(demo):
     assert "work_overlap" in overlap["warnings"]
 
     proposal = demo.finish_with_fixture_diff(session["id"])
-    confirmed = demo.confirm_proposal(proposal["id"])
+    confirmed = demo.confirm_proposal_via_cli(proposal["id"])
     later = demo.context_for_later_payment_task()
     assert confirmed["id"] in later["knowledge_ids"]
 ~~~
@@ -1745,7 +1797,7 @@ The fake Slack server implements thread retrieval and message posting for the re
 
 - [ ] **Step 4: Implement the full demo harness**
 
-scripts/demo.sh creates a temporary demo workspace, starts backend/web/fakes on free ports, initializes GPD, ingests the two docs, submits the signed Slack event, waits for durable jobs, selects BUG-1, starts a session, retrieves CLI and MCP context, creates overlap, completes work with the fixture diff, confirms knowledge, verifies reuse, and prints dashboard URLs. A trap always stops processes and keeps the temporary database path for inspection when the run fails.
+scripts/demo.sh creates a temporary demo workspace, starts backend/web/fakes on free ports, initializes GPD, ingests the three docs (PRD, FRD, ADR), submits the signed Slack event, waits for durable jobs, selects BUG-1, starts a session, retrieves CLI and MCP context, creates overlap, completes work with the fixture diff, confirms knowledge via CLI (human gate, never MCP), verifies reuse, and prints dashboard URLs. A trap always stops processes and keeps the temporary database path for inspection when the run fails.
 
 - [ ] **Step 5: Add browser acceptance coverage**
 
