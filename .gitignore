@@ -48,6 +48,7 @@ packages/*/dist/
 
 # SQLite / GPD local database
 .gpd/*.db
+.gpd/backups/
 .gpd/*.db-wal
 .gpd/*.db-shm
 .gpd/*.db-journal
