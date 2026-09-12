@@ -18,6 +18,31 @@ importers:
         specifier: ^3.0.7
         version: 3.2.7(@types/node@22.20.2)
 
+  apps/cli:
+    dependencies:
+      '@gpd/api-client':
+        specifier: workspace:*
+        version: link:../../packages/api-client
+      '@gpd/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@gpd/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      commander:
+        specifier: ^13.0.0
+        version: 13.1.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.13.9
+        version: 22.20.2
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.7(@types/node@22.20.2)
+
   packages/api-client:
     dependencies:
       '@gpd/contracts':
@@ -414,6 +439,10 @@ packages:
   check-error@2.1.3:
     resolution: {integrity: sha512-PAJdDJusoxnwm1VwW07VWwUN1sl7smmC3OKggvndJFadxxDRyFJBX/ggnu/KE4kQAB7a3Dp8f/YXC1FlUprWmA==}
     engines: {node: '>= 16'}
+
+  commander@13.1.0:
+    resolution: {integrity: sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==}
+    engines: {node: '>=18'}
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -849,6 +878,8 @@ snapshots:
       pathval: 2.0.1
 
   check-error@2.1.3: {}
+
+  commander@13.1.0: {}
 
   debug@4.4.3:
     dependencies:
