@@ -101,3 +101,64 @@ async def list_project_jobs(
     data = [_to_job_response(j) for j in jobs]
     envelope = ApiEnvelope[list[JobResponse]](ok=True, data=data)
     return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+@router.post(
+    "/api/v1/jobs/{job_id}/retry",
+    response_model=ApiEnvelope[JobResponse],
+)
+async def retry_job(
+    job_id: str,
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    def _txn():
+        with database.session() as session:
+            with session.begin():
+                repo = JobRepository(session)
+                job = repo.get_by_id(job_id)
+                if job is None:
+                    return ("missing", None, None)
+                if job.state not in ("failed", "cancelled"):
+                    return ("illegal", job.state, None)
+                job.state = "queued"
+                job.worker_id = None
+                job.lease_expires_at = None
+                job.error_message = None
+                job.error_category = None
+                job.progress = 0.0
+                session.flush()
+                return ("ok", None, _to_job_response(job).model_dump(mode="json"))
+    status_, state, payload = await database.write(_txn)
+    if status_ == "missing":
+        raise ApiException(status_code=404, code="job_not_found", message=f"Job {job_id} not found")
+    if status_ == "illegal":
+        raise ApiException(status_code=409, code="job_not_retryable", message=f"Job {job_id} in state {state} cannot be retried")
+    envelope = ApiEnvelope[JobResponse](ok=True, data=JobResponse.model_validate(payload))
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@router.post(
+    "/api/v1/jobs/{job_id}/cancel",
+    response_model=ApiEnvelope[JobResponse],
+)
+async def cancel_job(
+    job_id: str,
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    def _txn():
+        with database.session() as session:
+            with session.begin():
+                repo = JobRepository(session)
+                job = repo.get_by_id(job_id)
+                if job is None:
+                    return ("missing", None, None)
+                if not repo.cancel(job_id):
+                    return ("illegal", job.state, None)
+                refreshed = repo.get_by_id(job_id)
+                return ("ok", None, _to_job_response(refreshed).model_dump(mode="json"))
+    status_, state, payload = await database.write(_txn)
+    if status_ == "missing":
+        raise ApiException(status_code=404, code="job_not_found", message=f"Job {job_id} not found")
+    if status_ == "illegal":
+        raise ApiException(status_code=409, code="job_not_cancellable", message=f"Job {job_id} in state {state} cannot be cancelled")
+    envelope = ApiEnvelope[JobResponse](ok=True, data=JobResponse.model_validate(payload))
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))

@@ -10,6 +10,8 @@ from gpd.sources.schemas import (
     SourceIngestResult,
     SourceResponse,
 )
+from gpd.jobs.repository import JobRepository
+from gpd.sources.repository import SourceRepository
 from gpd.sources.service import SourceService
 
 router = APIRouter(tags=["sources"])
@@ -94,3 +96,37 @@ async def get_project_source(
         )
     envelope = ApiEnvelope[SourceDetailResponse](ok=True, data=detail)
     return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+@router.post(
+    "/api/v1/sources/{source_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_source(
+    source_id: str,
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    def _txn():
+        with database.session() as session:
+            with session.begin():
+                source_repo = SourceRepository(session)
+                source = source_repo.get_by_id(source_id)
+                if source is None:
+                    return None
+                job_repo = JobRepository(session)
+                job = job_repo.enqueue(
+                    job_type="ingest_source",
+                    payload={"source_id": source.id, "project_id": source.project_id},
+                    idempotency_key=f"ingest_source:{source.id}:manual-retry",
+                    project_id=source.project_id,
+                )
+                source_repo.update_state(source.id, "queued")
+                return {"id": source.id, "state": "queued", "job_id": job.id}
+    res = await database.write(_txn)
+    if res is None:
+        raise ApiException(
+            status_code=404,
+            code="source_not_found",
+            message=f"Source {source_id} not found",
+        )
+    envelope = ApiEnvelope[dict](ok=True, data=res)
+    return JSONResponse(status_code=202, content=envelope.model_dump(mode="json"))

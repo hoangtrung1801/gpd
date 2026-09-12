@@ -27,6 +27,27 @@ def tmp_database_path(tmp_path: Path) -> Path:
     return tmp_path / "test_gpd.db"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    # Pydantic reads .env directly, so deleting process env is not enough:
+    # override host/token to hermetic values (env beats dotenv).
+    monkeypatch.setenv("GPD_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("GPD_ACCESS_TOKEN", "")
+    for var in (
+        "GPD_API_PORT",
+        "GPD_SLACK_SIGNING_SECRET",
+        "GPD_SLACK_BOT_TOKEN",
+        "OPENAI_API_KEY",
+        "GPD_LLM_MODEL",
+        "GPD_EMBEDDING_MODEL",
+        "GPD_CONTEXT_TOKEN_BUDGET",
+        "GPD_SESSION_HEARTBEAT_TIMEOUT_SECONDS",
+        "GPD_DATABASE_PATH",
+        "GPD_APP_VERSION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    yield
+
 @pytest.fixture
 def settings(tmp_database_path: Path) -> Settings:
     return Settings(

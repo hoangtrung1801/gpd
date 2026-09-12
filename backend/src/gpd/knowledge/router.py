@@ -21,7 +21,8 @@ from gpd.knowledge.search import (
     SearchQuery,
     SqliteSearchIndex,
 )
-from gpd.knowledge.service import KnowledgeItemModel, KnowledgeService
+from gpd.knowledge.service import KnowledgeItem, KnowledgeItemModel, KnowledgeService
+from gpd.projects.repository import ProjectRepository
 
 router = APIRouter(tags=["knowledge"])
 
@@ -289,3 +290,29 @@ async def reject_proposal(
 
     res = await database.write(_txn)
     return ApiEnvelope[dict[str, Any]](ok=True, data=res)
+
+@router.get(
+    "/api/v1/projects/{project_id}/knowledge",
+    response_model=ApiEnvelope[list[KnowledgeItem]],
+)
+async def list_project_knowledge(
+    project_id: str,
+    status: str | None = None,
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    def _fetch():
+        with database.session() as session:
+            if ProjectRepository().get_by_id(session, project_id) is None:
+                return None
+            return KnowledgeService(database).list_items(
+                project_id, status=status or "confirmed"
+            )
+    items = await database.write(_fetch)
+    if items is None:
+        raise ApiException(
+            status_code=404,
+            code="project_not_found",
+            message=f"Project {project_id} not found",
+        )
+    envelope = ApiEnvelope[list[KnowledgeItem]](ok=True, data=items)
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
