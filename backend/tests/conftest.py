@@ -55,6 +55,8 @@ def settings(tmp_database_path: Path) -> Settings:
         api_host="127.0.0.1",
         api_port=7337,
         app_version="0.1.0",
+        slack_signing_secret=None,
+        slack_bot_token=None,
     )
 
 

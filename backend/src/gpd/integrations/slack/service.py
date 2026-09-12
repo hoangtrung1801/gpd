@@ -7,10 +7,11 @@ from gpd.conversations.service import ConversationService
 from gpd.db.engine import Database
 from gpd.db.models import IdempotencyKey, utc_now_iso
 from gpd.integrations.slack.client import FakeSlackClient, SlackClient, SlackMessage, SlackThread
-from gpd.integrations.slack.parser import is_bug_invocation, normalize_thread_messages
+from gpd.integrations.slack.parser import has_mention, is_bug_invocation, normalize_thread_messages
+from gpd.llm.openai import OpenAILlmGateway
+from gpd.llm.workflows.bug_extraction import BugExtractionWorkflow
 from gpd.tasks.schemas import TaskDetail
 from gpd.tasks.service import TaskService
-
 
 class SlackService:
     def __init__(
@@ -19,9 +20,12 @@ class SlackService:
         task_service: TaskService | None = None,
         conversation_service: ConversationService | None = None,
         slack_client: SlackClient | None = None,
+        llm_gateway: OpenAILlmGateway | None = None,
     ):
         self.database = database
-        self.task_service = task_service or TaskService(database)
+        self.llm_gateway = llm_gateway or OpenAILlmGateway()
+        workflow = BugExtractionWorkflow(self.llm_gateway)
+        self.task_service = task_service or TaskService(database, bug_workflow=workflow)
         self.conversation_service = conversation_service or ConversationService(
             database, self.task_service
         )
@@ -63,8 +67,23 @@ class SlackService:
         thread_ts = event.get("thread_ts") or event.get("ts", "")
         text = event.get("text", "")
 
-        # Only proceed if bug invocation matches
+        # If not a mention, ignore
+        if not has_mention(text):
+            return None
+
+        # Check if bug invocation
         if not is_bug_invocation(text):
+            # General mention -> respond using OpenAI
+            clean_text = text.replace("<@U0C1GAZ7JSY>", "").replace("@gpd", "").strip()
+            prompt = clean_text or "Hello!"
+            try:
+                reply = await self.llm_gateway.generate_text(
+                    prompt=prompt,
+                    system="You are GPD, a helpful AI engineering assistant in Slack. Keep responses concise, helpful, and developer-friendly."
+                )
+            except Exception as e:
+                reply = f"Hello! I am GPD. How can I assist you with your code or bugs today? (LLM note: {e})"
+            await self.slack_client.post_message(channel, thread_ts, reply)
             return None
 
         # Fetch thread

@@ -27,8 +27,10 @@ def is_protected_path(path: str) -> bool:
     """Check if the given request path requires authentication when an access token is configured.
 
     Protects /api/v1 and /health/ready.
-    Leaves /health/live open and minimal.
+    Leaves /health/live and Slack webhook callbacks open (they use HMAC signatures).
     """
+    if path.startswith("/api/v1/integrations/slack") or path.startswith("/integrations/slack"):
+        return False
     if path.startswith("/api/v1"):
         return True
     if path == "/health/ready" or path.startswith("/health/ready/"):

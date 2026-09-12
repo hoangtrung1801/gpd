@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from gpd.api.errors import ApiEnvelope, ApiException
 from gpd.db.engine import Database
+from gpd.integrations.slack.client import SlackClient
 from gpd.integrations.slack.config import get_slack_bot_token, get_slack_signing_secret
 from gpd.integrations.slack.service import SlackService
 from gpd.integrations.slack.signatures import (
@@ -78,10 +79,12 @@ async def handle_slack_events(request: Request) -> Any:
 
     # Event callback
     db: Database = request.app.state.database
+    bot_tok = get_slack_bot_token(request)
+    tok_str = bot_tok.get_secret_value() if bot_tok else None
+    client = SlackClient(bot_token=tok_str)
     slack_service: SlackService = getattr(
         request.app.state, "slack_service", None
-    ) or SlackService(db)
-
+    ) or SlackService(db, slack_client=client)
     task_detail = await slack_service.handle_event(payload)
 
     resp_data = {

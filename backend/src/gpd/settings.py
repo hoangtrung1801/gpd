@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     access_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
     slack_bot_token: SecretStr | None = None
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("openai_api_key", "OPENAI_API_KEY", "gpd_openai_api_key"),
+    )
 
     llm_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { spawn as nodeSpawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve as pathResolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ApiClient, ApiClientError, EXIT_CODES, type ExitCode } from "@gpd/api-client";
 import { findProjectConfig } from "@gpd/config";
 import type { GpdConfig } from "@gpd/contracts";
@@ -50,12 +53,19 @@ async function resolveConfigAndClient(runtime: CliRuntime): Promise<{
     }
   }
 
+  const env = runtime.env ?? (typeof process !== "undefined" ? process.env : {});
+  const token = env.GPD_ACCESS_TOKEN;
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const client =
     runtime.client ||
     new ApiClient({
-      baseUrl: config?.apiUrl || runtime.env?.GPD_API_URL || "http://127.0.0.1:7337",
+      baseUrl: config?.apiUrl || env.GPD_API_URL || "http://127.0.0.1:7337",
+      headers,
     });
-
   return { client, config, configPath };
 }
 
@@ -447,7 +457,13 @@ export async function runCli(
   try {
     await program.parseAsync(args, { from: "user" });
   } catch (err: unknown) {
-    if (!commandExecuted) {
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err.code === "commander.helpDisplayed" || err.code === "commander.version")
+    ) {
+      executedExitCode = 0;
+    } else if (!commandExecuted) {
       handleError(err);
     }
   }
@@ -460,7 +476,31 @@ export async function runCli(
 }
 
 // CLI direct execution
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const result = await runCli(process.argv.slice(2));
+let isDirectExecution = false;
+if (process.argv[1]) {
+  try {
+    const realArgv1 = realpathSync(process.argv[1]);
+    const fileUrl = pathToFileURL(realArgv1).href;
+    isDirectExecution =
+      fileUrl === import.meta.url ||
+      realArgv1 === fileURLToPath(import.meta.url) ||
+      realArgv1.endsWith("/gpd") ||
+      realArgv1.endsWith("/main.ts") ||
+      process.argv[1].endsWith("/gpd") ||
+      process.argv[1].endsWith("/main.ts");
+  } catch {
+    isDirectExecution =
+      import.meta.url === `file://${process.argv[1]}` ||
+      fileURLToPath(import.meta.url) === pathResolve(process.argv[1]) ||
+      process.argv[1].endsWith("/gpd") ||
+      process.argv[1].endsWith("/main.ts");
+  }
+}
+if (isDirectExecution) {
+  const result = await runCli(process.argv.slice(2), {
+    stdout: (chunk) => process.stdout.write(chunk),
+    stderr: (chunk) => process.stderr.write(chunk),
+    env: process.env,
+  });
   process.exit(result.exitCode);
 }

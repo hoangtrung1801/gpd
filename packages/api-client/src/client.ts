@@ -128,6 +128,7 @@ export type ApiClientOptions = {
   baseUrl: string;
   timeoutMs?: number;
   fetch?: typeof fetch;
+  headers?: Record<string, string>;
 };
 
 export type RequestOptions = {
@@ -145,11 +146,13 @@ export class ApiClient {
   readonly baseUrl: string;
   readonly defaultTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly defaultHeaders: Record<string, string>;
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.defaultTimeoutMs = options.timeoutMs ?? 10_000;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.defaultHeaders = options.headers ?? {};
   }
 
   async request<T>(options: RequestOptions): Promise<ApiEnvelope<T>> {
@@ -172,6 +175,7 @@ export class ApiClient {
 
     const headers: Record<string, string> = {
       Accept: "application/json",
+      ...this.defaultHeaders,
       ...options.headers,
     };
 

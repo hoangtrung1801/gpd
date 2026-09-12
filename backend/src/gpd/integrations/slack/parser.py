@@ -22,6 +22,11 @@ def is_bug_invocation(text: str) -> bool:
         return False
     return any(phrase in lower for phrase in SUPPORTED_BUG_PHRASES)
 
+def has_mention(text: str) -> bool:
+    if not text:
+        return False
+    return bool(MENTION_PATTERN.search(text.lower()))
+
 
 def normalize_thread_messages(thread: SlackThread) -> list[ConversationMessageCreate]:
     # Sort messages by timestamp

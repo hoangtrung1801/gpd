@@ -22,6 +22,29 @@ class SlackClient:
         self.bot_token = bot_token
 
     async def fetch_thread(self, channel_id: str, thread_ts: str) -> SlackThread:
+        if self.bot_token:
+            import httpx
+            url = f"https://slack.com/api/conversations.replies?channel={channel_id}&ts={thread_ts}"
+            headers = {"Authorization": f"Bearer {self.bot_token}"}
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("ok"):
+                            msgs = [
+                                SlackMessage(
+                                    ts=m["ts"],
+                                    user=m.get("user", "U_UNKNOWN"),
+                                    text=m.get("text", ""),
+                                    thread_ts=m.get("thread_ts", thread_ts),
+                                )
+                                for m in data.get("messages", [])
+                            ]
+                            return SlackThread(channel_id=channel_id, thread_ts=thread_ts, messages=msgs)
+            except Exception:
+                pass
+
         # Default fixture fallback if no network token
         fixture_path = Path("fixtures/slack/checkout_bug_thread.json")
         if fixture_path.exists():
@@ -41,8 +64,27 @@ class SlackClient:
     async def post_message(
         self, channel_id: str, thread_ts: str, text: str
     ) -> dict[str, Any]:
-        return {"ok": True, "channel": channel_id, "ts": thread_ts, "text": text}
+        if self.bot_token:
+            import httpx
+            url = "https://slack.com/api/chat.postMessage"
+            headers = {
+                "Authorization": f"Bearer {self.bot_token}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "channel": channel_id,
+                "text": text,
+            }
+            if thread_ts:
+                payload["thread_ts"] = thread_ts
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    return resp.json()
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
 
+        return {"ok": True, "channel": channel_id, "ts": thread_ts, "text": text}
 
 class FakeSlackClient(SlackClient):
     def __init__(self) -> None:
