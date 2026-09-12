@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo } from "react";
 import { ApiClient } from "@gpd/api-client";
-import type { HealthStatus } from "@gpd/contracts";
+import type { HealthStatus, Project } from "@gpd/contracts";
 import { createTasksApi, type TasksApi } from "../features/tasks/api";
 import { createKnowledgeApi, type KnowledgeApi } from "../features/knowledge/api";
 import { createSourcesApi, type SourcesApi } from "../features/sources/api";
@@ -20,6 +20,7 @@ export interface AppContextValue {
   settingsApi: SettingsApi;
   health: HealthStatus | null;
   projectId: string;
+  isProjectLoading?: boolean;
   refreshHealth: () => Promise<void>;
 }
 
@@ -49,7 +50,7 @@ export const AppProviders: React.FC<AppProvidersProps> = ({
   jobsApi: customJobsApi,
   settingsApi: customSettingsApi,
   initialHealth = null,
-  projectId = "project-1",
+  projectId: customProjectId,
   children,
 }) => {
   const client = useMemo(
@@ -66,7 +67,8 @@ export const AppProviders: React.FC<AppProvidersProps> = ({
   const settingsApi = useMemo(() => customSettingsApi || createSettingsApi(client), [customSettingsApi, client]);
 
   const [health, setHealth] = useState<HealthStatus | null>(initialHealth);
-
+  const [projectId, setProjectId] = useState<string>(customProjectId || "project-1");
+  const [isProjectLoading, setIsProjectLoading] = useState<boolean>(!customProjectId);
   const refreshHealth = async () => {
     try {
       const res = await client.getHealth();
@@ -88,6 +90,43 @@ export const AppProviders: React.FC<AppProvidersProps> = ({
       void refreshHealth();
     }
   }, [client, initialHealth]);
+  useEffect(() => {
+    if (customProjectId) {
+      setProjectId(customProjectId);
+      setIsProjectLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+    const loadProject = async () => {
+      setIsProjectLoading(true);
+      try {
+        const res = await client.request<Project[]>({
+          path: "/api/v1/projects",
+        });
+        if (!isMounted) return;
+        if (res.data && Array.isArray(res.data) && res.data.length > 0 && res.data[0]?.id) {
+          setProjectId(res.data[0].id);
+        } else {
+          setProjectId("project-1");
+        }
+      } catch {
+        if (!isMounted) return;
+        setProjectId("project-1");
+      } finally {
+        if (isMounted) {
+          setIsProjectLoading(false);
+        }
+      }
+    };
+
+    void loadProject();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [client, customProjectId]);
+
 
   const value = useMemo(
     () => ({
@@ -101,6 +140,7 @@ export const AppProviders: React.FC<AppProvidersProps> = ({
       settingsApi,
       health,
       projectId,
+      isProjectLoading,
       refreshHealth,
     }),
     [
@@ -114,6 +154,7 @@ export const AppProviders: React.FC<AppProvidersProps> = ({
       settingsApi,
       health,
       projectId,
+      isProjectLoading,
     ]
   );
 
