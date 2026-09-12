@@ -1,0 +1,57 @@
+import type { ApiClient } from "@gpd/api-client";
+import type { GpdConfig, Task } from "@gpd/contracts";
+import { writeProjectConfig } from "@gpd/config";
+
+export async function executeTaskList(
+  client: ApiClient,
+  config: GpdConfig,
+  filters: { status?: string; query?: string; cursor?: string } = {}
+): Promise<{ items: Task[]; next_cursor?: string | null }> {
+  const response = await client.listTasks({
+    project_id: config.projectId,
+    status: filters.status,
+    query: filters.query,
+    cursor: filters.cursor,
+  });
+
+  return response.data ?? { items: [] };
+}
+
+export async function executeTaskShow(
+  client: ApiClient,
+  taskId: string
+): Promise<Task> {
+  const response = await client.getTask(taskId);
+  if (!response.data) {
+    throw new Error(`Task '${taskId}' not found`);
+  }
+  return response.data;
+}
+
+export async function executeTaskSet(
+  client: ApiClient,
+  config: GpdConfig,
+  configPath: string,
+  taskId: string
+): Promise<{ previousTaskId: string | null; currentTaskId: string; task: Task }> {
+  // Validate task existence
+  const response = await client.getTask(taskId);
+  if (!response.data) {
+    throw new Error(`Task '${taskId}' not found`);
+  }
+
+  const validTask = response.data;
+  const previousTaskId = config.currentTaskId;
+  const updatedConfig: GpdConfig = {
+    ...config,
+    currentTaskId: validTask.public_id || validTask.id,
+  };
+
+  await writeProjectConfig(configPath, updatedConfig);
+
+  return {
+    previousTaskId,
+    currentTaskId: updatedConfig.currentTaskId!,
+    task: validTask,
+  };
+}
