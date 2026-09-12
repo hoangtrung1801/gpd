@@ -14,7 +14,13 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      "/api": "http://100.67.176.76:4040",
+      "/api": {
+        target: "http://100.67.176.76:4040",
+        changeOrigin: true,
+        headers: process.env.GPD_ACCESS_TOKEN
+          ? { Authorization: `Bearer ${process.env.GPD_ACCESS_TOKEN}` }
+          : {},
+      },
       "/health": "http://100.67.176.76:4040",
     },
   },
