@@ -1,4 +1,14 @@
-import { randomUUID } from "node:crypto";
+function generateUuid(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+    (
+      Number(c) ^
+      (globalThis.crypto?.getRandomValues(new Uint8Array(1))[0] ?? Math.floor(Math.random() * 256) & (15 >> (Number(c) / 4)))
+    ).toString(16)
+  );
+}
 import type {
   ApiEnvelope,
   ApiError,
@@ -167,7 +177,7 @@ export class ApiClient {
 
     const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
     if (isMutation && options.idempotencyKey !== false) {
-      headers["Idempotency-Key"] = options.idempotencyKey || randomUUID();
+      headers["Idempotency-Key"] = options.idempotencyKey || generateUuid();
     }
 
     let requestBody: string | undefined;
