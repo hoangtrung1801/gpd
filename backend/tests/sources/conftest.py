@@ -51,23 +51,8 @@ def clock() -> FakeClock:
 
 
 def run_all_migrations(database: Database, *args, **kwargs) -> None:
-    our_versions = str(Path(__file__).resolve().parents[2] / "migrations" / "versions")
-    found_versions = "/home/work/gpd-worktrees/foundation/backend/migrations/versions"
-    env_path = "/home/work/gpd-worktrees/foundation/backend/migrations"
-
-    cfg = Config()
-    cfg.set_main_option("script_location", env_path)
-    cfg.set_main_option("version_locations", f"{found_versions} {our_versions}")
-
-    with database.connect() as conn:
-        cfg.attributes["connection"] = conn
-        command.upgrade(cfg, "head")
-        conn.commit()
-
-
-# Hook into app and migrations so lifespan runs all migrations
-gpd.app.run_migrations = run_all_migrations
-gpd.db.migrations.run_migrations = run_all_migrations
+    from gpd.db.migrations import run_migrations
+    run_migrations(database)
 
 
 @pytest.fixture
